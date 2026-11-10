@@ -16,6 +16,8 @@ import java.util.Locale
 class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private lateinit var siwc: SiwcClient
     private lateinit var status: TextView
+    private lateinit var diagnostics: TextView
+    private val trace = ArrayDeque<String>()
     private lateinit var result: TextView
     private lateinit var input: EditText
     private lateinit var models: Spinner
@@ -64,11 +66,18 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 siwc.signOut()
                 modelChoices.clear()
                 history.clear()
-                status.text = "Сессия завершена в приложении. Можно войти снова."
+                showStatus("Сессия завершена в приложении. Можно войти снова.")
             }
         })
         status = TextView(this).apply { text = "Для начала нажми Continue with ChatGPT."; textSize = 16f }
         layout.addView(status)
+        layout.addView(TextView(this).apply { text = "Диагностика подключения:"; textSize = 16f })
+        diagnostics = TextView(this).apply {
+            textSize = 13f
+            text = "Этапы OAuth появятся здесь. Браузерный callback ещё не означает завершение входа."
+            setTextIsSelectable(true)
+        }
+        layout.addView(diagnostics)
         layout.addView(TextView(this).apply { text = "Модель, доступная аккаунту:" })
         models = Spinner(this)
         layout.addView(models)
@@ -115,11 +124,11 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                     modelChoices.clear()
                     modelChoices.addAll(fetched)
                     if (modelChoices.isEmpty()) {
-                        status.text = "Модели не получены. Возможно, план не поддерживает эту интеграцию."
+                        showStatus("Модели не получены. Возможно, план не поддерживает эту интеграцию.")
                     } else {
                         models.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item,
                             modelChoices.map { it.second + " (" + it.first + ")" })
-                        status.text = "✅ Моделей: " + modelChoices.size + ". Можно отправить вопрос."
+                        showStatus("✅ Моделей: " + modelChoices.size + ". Можно отправить вопрос.")
                     }
                 }
             } catch (e: Exception) {
@@ -134,7 +143,13 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             status.text = "Введите текст или выберите фото."
             return
         }
-        if (!siwc.signedIn) { status.text = "Сначала войди через ChatGPT."; return }
+        if (!siwc.signedIn) {
+            showStatus(if (siwc.isAuthorizing)
+                "⌛ Идёт подтверждение входа. Сначала дождись проверки токена."
+            else
+                "❌ Нет активного токена. Последний этап указан в диагностике выше. Повтори вход.")
+            return
+        }
         val chosen = modelChoices.getOrNull(models.selectedItemPosition)
         if (chosen == null) { status.text = "Список моделей ещё не загружен."; return }
         val image = selectedImage
@@ -147,7 +162,7 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 runOnUiThread {
                     history.add(turn)
                     result.text = reply.ifBlank { "Модель вернула пустой текст." }
-                    status.text = "✅ Ответ получен. Контекст разговора сохранён внутри приложения."
+                    showStatus("✅ Ответ получен. Контекст разговора сохранён внутри приложения.")
                     speech.speak(reply, TextToSpeech.QUEUE_FLUSH, null, "siwc-answer")
                 }
             } catch (e: Exception) {
@@ -157,7 +172,12 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     private fun showStatus(message: String) {
-        runOnUiThread { status.text = message }
+        runOnUiThread {
+            status.text = message
+            trace.addLast(message)
+            if (trace.size > 12) trace.removeFirst()
+            diagnostics.text = trace.joinToString("\\n")
+        }
     }
 
     override fun onInit(code: Int) {
