@@ -11,6 +11,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import kotlin.concurrent.thread
 import java.util.Locale
+import java.net.InetAddress
+import java.net.HttpURLConnection
+import java.net.URL
 
 /** Independent test screen: it does not change BV200 Bluetooth button handling. */
 class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
@@ -48,10 +51,10 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             orientation = LinearLayout.VERTICAL
             setPadding(30, 22, 30, 22)
         }
-        layout.addView(TextView(this).apply { text = "Stereoo AI • Sign in with ChatGPT (ТЕСТ)"; textSize = 23f })
+        layout.addView(TextView(this).apply { text = "Stereoo AI • SIWC ДИАГНОСТИКА v3"; textSize = 23f })
         layout.addView(TextView(this).apply {
-            text = "Отдельный тест входа через подписку ChatGPT. Без API-ключа и без нашего сервера. " +
-                "Это не рабочая версия для очков BV200."
+            text = "Отдельная проверочная сборка v3. В браузере может появиться подтверждение входа, " +
+                "но доступ готов только после получения токена и списка моделей. Очки BV200 не подключены."
         })
         val login = Button(this).apply {
             text = "Continue with ChatGPT"
@@ -60,6 +63,17 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             }
         }
         layout.addView(login)
+        layout.addView(Button(this).apply {
+            text = "🌐 Проверить DNS и HTTPS"
+            setOnClickListener { checkNetwork() }
+        })
+        layout.addView(Button(this).apply {
+            text = "⛔ Отменить незавершённый вход"
+            setOnClickListener {
+                siwc.cancelAuthorization()
+                showStatus("Попытка входа отменена. Можно снова нажать Continue with ChatGPT.")
+            }
+        })
         layout.addView(Button(this).apply {
             text = "Выйти из тестовой сессии"
             setOnClickListener {
@@ -113,6 +127,40 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         result = TextView(this).apply { textSize = 18f; text = "Ответ появится здесь." }
         layout.addView(result)
         setContentView(ScrollView(this).apply { addView(layout) })
+        showStatus("Диагностика v3. Сначала проверь DNS и HTTPS.")
+    }
+
+    private fun checkNetwork() {
+        showStatus("Проверяю DNS и HTTPS для auth.openai.com и api.openai.com...")
+        thread(name = "siwc-network-check") {
+            for (host in listOf("auth.openai.com", "api.openai.com")) {
+                try {
+                    val addresses = InetAddress.getAllByName(host)
+                    showStatus("✅ DNS " + host + ": " + addresses.size + " адрес(ов).")
+                } catch (e: Exception) {
+                    showStatus("❌ DNS " + host + ": " + (e.message ?: e.javaClass.simpleName))
+                    continue
+                }
+                try {
+                    val path = if (host == "auth.openai.com")
+                        "/.well-known/openid-configuration"
+                    else
+                        "/v1/models"
+                    val connection = (URL("https://" + host + path).openConnection() as HttpURLConnection)
+                    connection.connectTimeout = 7000
+                    connection.readTimeout = 7000
+                    connection.requestMethod = "GET"
+                    try {
+                        val code = connection.responseCode
+                        showStatus("HTTPS " + host + ": HTTP " + code +
+                            if (host == "api.openai.com" && code == 401)
+                                " (401 без токена здесь ожидается)." else ".")
+                    } finally { connection.disconnect() }
+                } catch (e: Exception) {
+                    showStatus("❌ HTTPS " + host + ": " + (e.message ?: e.javaClass.simpleName))
+                }
+            }
+        }
     }
 
     private fun loadModels() {
