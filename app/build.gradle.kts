@@ -8,11 +8,11 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "ru.stereoo.aiglasses.siwcdemo"
+        applicationId = "ru.stereoo.aiglasses.siwcdiag4"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.1-siwc-diagnostics"
+        versionCode = 4
+        versionName = "4.0-diagnostics"
     }
 
     compileOptions {
