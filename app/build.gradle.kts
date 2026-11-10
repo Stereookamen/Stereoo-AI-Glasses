@@ -11,8 +11,8 @@ android {
         applicationId = "ru.stereoo.aiglasses.siwcdemo"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0-siwc-demo"
+        versionCode = 3
+        versionName = "1.1-siwc-diagnostics"
     }
 
     compileOptions {
