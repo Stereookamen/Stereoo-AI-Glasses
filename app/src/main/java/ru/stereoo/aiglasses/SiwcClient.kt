@@ -20,6 +20,7 @@ import java.security.SecureRandom
 import java.security.Signature
 import java.security.spec.RSAPublicKeySpec
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 
 /**
@@ -31,6 +32,7 @@ import kotlin.concurrent.thread
 class SiwcClient(private val activity: Activity) {
     private val prefs = activity.getSharedPreferences("siwc_poc_public", Activity.MODE_PRIVATE)
     private val random = SecureRandom()
+    private val attempts = AtomicInteger(0)
     @Volatile private var listener: ServerSocket? = null
     @Volatile var isAuthorizing = false
         private set
@@ -40,8 +42,14 @@ class SiwcClient(private val activity: Activity) {
 
     val signedIn: Boolean get() = accessToken != null && System.currentTimeMillis() < expiryMs - 60_000L
     fun close() { try { listener?.close() } catch (_: Exception) {} }
-    fun signOut() {
+    fun cancelAuthorization() {
+        attempts.incrementAndGet()
         close()
+        listener = null
+        isAuthorizing = false
+    }
+    fun signOut() {
+        cancelAuthorization()
         accessToken = null
         expiryMs = 0
         registeredSubject = null
@@ -49,7 +57,16 @@ class SiwcClient(private val activity: Activity) {
     }
 
     fun signIn(report: (String) -> Unit, onSignedIn: () -> Unit) {
-        if (listener != null || isAuthorizing) { report("Авторизация уже запущена."); return }
+        if (listener != null || isAuthorizing) {
+            report("Авторизация уже запущена. Вернись из браузера или нажми «Отменить незавершённый вход».")
+            return
+        }
+        if (signedIn) {
+            report("Токен уже получен. Запрашиваем список моделей.")
+            activity.runOnUiThread { onSignedIn() }
+            return
+        }
+        val currentAttempt = attempts.incrementAndGet()
         isAuthorizing = true
         val existingClientId = prefs.getString("client_id", null)
         val hostId = prefs.getString("host_id", null) ?: ("urn:uuid:" + UUID.randomUUID()).also {
@@ -147,6 +164,7 @@ class SiwcClient(private val activity: Activity) {
                             "resource" to "https://api.openai.com/v1"
                         )
                     )
+                    if (attempts.get() != currentAttempt) throw IllegalStateException("Попытка входа отменена.")
                     report("ШАГ 3/5: ответ сервера получен. Проверяем разрешения...")
                     val scopes = tokens.optString("scope", "").split(" ")
                     if (!scopes.contains("chatgpt.tokens.use.direct") || !scopes.contains("resource.invoke")) {
@@ -160,6 +178,7 @@ class SiwcClient(private val activity: Activity) {
                     }
                     registeredSubject = sub
                     prefs.edit().putString("subject", sub).apply()
+                    if (attempts.get() != currentAttempt) throw IllegalStateException("Попытка входа отменена.")
                     accessToken = tokens.getString("access_token")
                     expiryMs = System.currentTimeMillis() + tokens.optLong("expires_in", 3600) * 1000
                     report("✅ ШАГ 5/5: вход и разрешения подтверждены. Получаем список моделей...")
@@ -174,15 +193,19 @@ class SiwcClient(private val activity: Activity) {
                     }
                     report(problem)
                 } finally {
-                    close()
-                    listener = null
-                    isAuthorizing = false
+                    try { server.close() } catch (_: Exception) {}
+                    if (attempts.get() == currentAttempt) {
+                        listener = null
+                        isAuthorizing = false
+                    }
                 }
             }
         } catch (e: Exception) {
-            close()
-            listener = null
-            isAuthorizing = false
+            if (attempts.get() == currentAttempt) {
+                close()
+                listener = null
+                isAuthorizing = false
+            }
             report("❌ Не удалось начать вход: " + safeError(e.message ?: "ошибка"))
         }
     }
