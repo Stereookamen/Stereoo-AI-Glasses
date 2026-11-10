@@ -11,8 +11,8 @@ android {
         applicationId = "ru.stereoo.aiglasses.siwcdiag4"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "4.0-diagnostics"
+        versionCode = 5
+        versionName = "5.0-diagnostics"
     }
 
     compileOptions {
