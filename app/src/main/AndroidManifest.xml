@@ -10,12 +10,13 @@
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
+        <!-- Launch the SIWC test directly, not the legacy API-key demo screen. -->
         <activity
-            android:name="ru.stereoo.aiglasses.SiwcTestActivity"
+            android:name="ru.stereoo.aiglasses.MainActivity"
             android:exported="false" />
 
         <activity
-            android:name="ru.stereoo.aiglasses.MainActivity"
+            android:name="ru.stereoo.aiglasses.SiwcTestActivity"
             android:exported="true">
 
             <intent-filter>
