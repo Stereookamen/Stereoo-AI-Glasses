@@ -162,7 +162,8 @@ class SiwcClient(private val activity: Activity) {
                             "code_verifier" to verifier,
                             "redirect_uri" to callback,
                             "resource" to "https://api.openai.com/v1"
-                        )
+                        ),
+                        report
                     )
                     if (attempts.get() != currentAttempt) throw IllegalStateException("Попытка входа отменена.")
                     report("ШАГ 3/5: ответ сервера получен. Проверяем разрешения...")
@@ -297,23 +298,40 @@ class SiwcClient(private val activity: Activity) {
     private fun token(): String =
         if (signedIn) accessToken!! else throw IllegalStateException("Войди заново. Тестовая сессия живёт не дольше часа.")
 
-    private fun tokenExchange(params: Map<String, String>): JSONObject {
+    /**
+     * Retry only DNS resolution failures. In that case the HTTP request never reached the
+     * token endpoint, so the one-time authorization code was not consumed.
+     * Do NOT retry HTTP errors or transport timeouts: the server may have used the code.
+     */
+    private fun tokenExchange(params: Map<String, String>, report: (String) -> Unit): JSONObject {
         val body = params.entries.joinToString("&") {
             URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
         }
-        val conn = (URL("https://auth.openai.com/api/accounts/oauth/token").openConnection() as HttpURLConnection)
-        try {
-            conn.requestMethod = "POST"
-            conn.connectTimeout = 20_000
-            conn.readTimeout = 30_000
-            conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
-            conn.doOutput = true
-            conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
-            val responseText = (if (conn.responseCode in 200..299) conn.inputStream else conn.errorStream)
-                .bufferedReader().use { it.readText() }
-            if (conn.responseCode !in 200..299) throw IllegalStateException("OAuth HTTP " + conn.responseCode + ": " + responseText.take(350))
-            return JSONObject(responseText)
-        } finally { conn.disconnect() }
+        for (attempt in 1..3) {
+            val conn = (URL("https://auth.openai.com/api/accounts/oauth/token").openConnection() as HttpURLConnection)
+            try {
+                conn.requestMethod = "POST"
+                conn.connectTimeout = 20_000
+                conn.readTimeout = 30_000
+                conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded")
+                conn.doOutput = true
+                conn.outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                val code = conn.responseCode
+                val responseText = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                    .bufferedReader().use { it.readText() }
+                if (code !in 200..299) throw IllegalStateException("OAuth HTTP " + code + ": " + safeError(responseText))
+                return JSONObject(responseText)
+            } catch (dns: java.net.UnknownHostException) {
+                if (attempt == 3) throw dns
+                val delayMs = if (attempt == 1) 1800L else 5200L
+                report("DNS auth.openai.com временно недоступен. Повтор " + attempt + "/2 через " +
+                    (delayMs / 1000) + " с. Код авторизации пока не использован.")
+                Thread.sleep(delayMs)
+            } finally {
+                conn.disconnect()
+            }
+        }
+        throw IllegalStateException("Не удалось получить токен после проверки DNS.")
     }
 
     private fun verifyIdToken(jwt: String, clientId: String, nonce: String): JSONObject {
