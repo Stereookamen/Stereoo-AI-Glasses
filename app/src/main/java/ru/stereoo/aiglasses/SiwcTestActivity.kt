@@ -176,7 +176,7 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             status.text = message
             trace.addLast(message)
             if (trace.size > 12) trace.removeFirst()
-            diagnostics.text = trace.joinToString("\\n")
+            diagnostics.text = trace.joinToString("\n")
         }
     }
 
