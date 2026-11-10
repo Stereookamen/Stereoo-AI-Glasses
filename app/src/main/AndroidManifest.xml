@@ -11,6 +11,10 @@
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
+            android:name="ru.stereoo.aiglasses.SiwcTestActivity"
+            android:exported="false" />
+
+        <activity
             android:name="ru.stereoo.aiglasses.MainActivity"
             android:exported="true">
 
