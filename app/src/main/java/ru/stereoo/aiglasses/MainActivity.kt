@@ -65,6 +65,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             hint = "Напиши вопрос..."
             minLines = 2
         }
+        layout.addView(Button(this).apply {
+            text = "🔑 Тест: войти через ChatGPT (без API-ключа)"
+            setOnClickListener {
+                startActivity(Intent(this@MainActivity, SiwcTestActivity::class.java))
+            }
+        })
         layout.addView(question)
 
         val askButton = Button(this).apply {
