@@ -165,7 +165,14 @@ class SiwcClient(private val activity: Activity) {
                     report("✅ ШАГ 5/5: вход и разрешения подтверждены. Получаем список моделей...")
                     activity.runOnUiThread { onSignedIn() }
                 } catch (e: Exception) {
-                    report("❌ Авторизация не завершена: " + safeError(e.message ?: e.javaClass.simpleName))
+                    val problem = if (e is java.net.UnknownHostException ||
+                        e.cause is java.net.UnknownHostException) {
+                        "Ошибка DNS: телефон не может найти auth.openai.com. Код из браузера получен, " +
+                            "но обменять его на токен через эту сеть невозможно. Это не ошибка подписки."
+                    } else {
+                        "❌ Авторизация не завершена: " + safeError(e.message ?: e.javaClass.simpleName)
+                    }
+                    report(problem)
                 } finally {
                     close()
                     listener = null
