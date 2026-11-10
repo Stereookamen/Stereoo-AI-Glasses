@@ -158,7 +158,7 @@ class SiwcClient(private val activity: Activity) {
                     accessToken = tokens.getString("access_token")
                     expiryMs = System.currentTimeMillis() + tokens.optLong("expires_in", 3600) * 1000
                     report("✅ Вход подтверждён. План ChatGPT разрешён.")
-                    activity.runOnUiThread(onSignedIn)
+                    activity.runOnUiThread { onSignedIn() }
                 } catch (e: Exception) {
                     report("Не удалось войти: " + (e.message ?: e.javaClass.simpleName))
                 } finally {
