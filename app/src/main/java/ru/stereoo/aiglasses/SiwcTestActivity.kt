@@ -51,9 +51,9 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
             orientation = LinearLayout.VERTICAL
             setPadding(30, 22, 30, 22)
         }
-        layout.addView(TextView(this).apply { text = "Stereoo AI • SIWC ДИАГНОСТИКА v4"; textSize = 23f })
+        layout.addView(TextView(this).apply { text = "Stereoo AI • SIWC ДИАГНОСТИКА v5"; textSize = 23f })
         layout.addView(TextView(this).apply {
-            text = "Отдельная проверочная сборка v4. В браузере может появиться подтверждение входа, " +
+            text = "Отдельная проверочная сборка v5. В браузере может появиться подтверждение входа, " +
                 "но доступ готов только после получения токена и списка моделей. Очки BV200 не подключены."
         })
         val login = Button(this).apply {
@@ -127,7 +127,7 @@ class SiwcTestActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         result = TextView(this).apply { textSize = 18f; text = "Ответ появится здесь." }
         layout.addView(result)
         setContentView(ScrollView(this).apply { addView(layout) })
-        showStatus("Диагностика v4. Сначала проверь DNS и HTTPS.")
+        showStatus("Диагностика v5. Сначала проверь DNS и HTTPS.")
     }
 
     private fun checkNetwork() {
