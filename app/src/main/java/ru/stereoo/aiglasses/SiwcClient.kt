@@ -32,6 +32,8 @@ class SiwcClient(private val activity: Activity) {
     private val prefs = activity.getSharedPreferences("siwc_poc_public", Activity.MODE_PRIVATE)
     private val random = SecureRandom()
     @Volatile private var listener: ServerSocket? = null
+    @Volatile var isAuthorizing = false
+        private set
     @Volatile private var accessToken: String? = null
     @Volatile private var expiryMs: Long = 0L
     private var registeredSubject: String? = prefs.getString("subject", null)
@@ -47,7 +49,8 @@ class SiwcClient(private val activity: Activity) {
     }
 
     fun signIn(report: (String) -> Unit, onSignedIn: () -> Unit) {
-        if (listener != null) { report("Авторизация уже запущена."); return }
+        if (listener != null || isAuthorizing) { report("Авторизация уже запущена."); return }
+        isAuthorizing = true
         val existingClientId = prefs.getString("client_id", null)
         val hostId = prefs.getString("host_id", null) ?: ("urn:uuid:" + UUID.randomUUID()).also {
             prefs.edit().putString("host_id", it).apply()
@@ -75,7 +78,7 @@ class SiwcClient(private val activity: Activity) {
                 .appendQueryParameter("code_challenge", base64Url(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray())))
             if (existingClientId == null) builder.appendQueryParameter("agent_name_hint", "Stereoo AI Glasses")
 
-            report("Открываем браузер ChatGPT. Вернись в приложение после разрешения.")
+            report("ШАГ 1/5: открываем страницу ChatGPT в браузере.")
             activity.startActivity(Intent(Intent.ACTION_VIEW, builder.build()).addCategory(Intent.CATEGORY_BROWSABLE))
 
             thread(name = "siwc-loopback") {
@@ -128,12 +131,12 @@ class SiwcClient(private val activity: Activity) {
                                     issuedClientId = existingClientId
                                 }
                                 if (code.isNullOrBlank()) throw IllegalStateException("Нет OAuth-кода.")
-                                sendBrowserReply(socket, "Вход получен. Вернись в Stereoo AI Glasses.", 200)
+                                sendBrowserReply(socket, "Код входа передан приложению. Подтверждение доступа ещё выполняется. Вернитесь в Stereoo AI.", 200)
                                 validCallback = true
                             }
                         }
                     }
-                    report("Получен код входа. Проверяем разрешения...")
+                    report("ШАГ 2/5: код OAuth получен. Обмениваем код на токен...")
                     val tokens = tokenExchange(
                         mapOf(
                             "grant_type" to "authorization_code",
@@ -144,10 +147,12 @@ class SiwcClient(private val activity: Activity) {
                             "resource" to "https://api.openai.com/v1"
                         )
                     )
+                    report("ШАГ 3/5: ответ сервера получен. Проверяем разрешения...")
                     val scopes = tokens.optString("scope", "").split(" ")
                     if (!scopes.contains("chatgpt.tokens.use.direct") || !scopes.contains("resource.invoke")) {
                         throw IllegalStateException("Вход выполнен, но доступ к лимитам ChatGPT не разрешён.")
                     }
+                    report("ШАГ 4/5: разрешения подтверждены. Проверяем подпись ID-токена...")
                     val verified = verifyIdToken(tokens.getString("id_token"), issuedClientId!!, nonce)
                     val sub = verified.getString("sub")
                     if (registeredSubject != null && registeredSubject != sub) {
@@ -157,19 +162,21 @@ class SiwcClient(private val activity: Activity) {
                     prefs.edit().putString("subject", sub).apply()
                     accessToken = tokens.getString("access_token")
                     expiryMs = System.currentTimeMillis() + tokens.optLong("expires_in", 3600) * 1000
-                    report("✅ Вход подтверждён. План ChatGPT разрешён.")
+                    report("✅ ШАГ 5/5: вход и разрешения подтверждены. Получаем список моделей...")
                     activity.runOnUiThread { onSignedIn() }
                 } catch (e: Exception) {
-                    report("Не удалось войти: " + (e.message ?: e.javaClass.simpleName))
+                    report("❌ Авторизация не завершена: " + safeError(e.message ?: e.javaClass.simpleName))
                 } finally {
                     close()
                     listener = null
+                    isAuthorizing = false
                 }
             }
         } catch (e: Exception) {
             close()
             listener = null
-            report("Не удалось начать вход: " + (e.message ?: "ошибка"))
+            isAuthorizing = false
+            report("❌ Не удалось начать вход: " + safeError(e.message ?: "ошибка"))
         }
     }
 
@@ -345,6 +352,12 @@ class SiwcClient(private val activity: Activity) {
         socket.getOutputStream().write(http.toByteArray(Charsets.US_ASCII))
         socket.getOutputStream().write(bytes)
         socket.getOutputStream().flush()
+    }
+
+    // Keep any security-sensitive OAuth/HTTP response data out of diagnostic screenshots.
+    private fun safeError(message: String): String {
+        val parsed = message.replace(Regex("(?i)(access_token|refresh_token|id_token|authorization_code|code_verifier|client_secret)[\\\":=\\s]+[^,\\s\\\"}]+"), "$1=[скрыто]")
+        return parsed.take(200)
     }
 
     private fun randomUrlSafe(n: Int): String = ByteArray(n).also { random.nextBytes(it) }.let(::base64Url)
