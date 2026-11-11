@@ -190,15 +190,28 @@ class MainActivity : ComponentActivity() {
                     }
                     when (type) {
                         "session.created" -> {
-                            lastPhase = "Получено session.created; отправляем настройки"
-                            sendSessionSetup(webSocket)
+                            val model = evt.optJSONObject("session")?.optString("model").orEmpty()
+                            appendTranscript("✓ session.created; модель: " + model.take(80))
+                            if (mode == TestMode.CONNECT_ONLY) {
+                                lastPhase = "session.created; без session.update"
+                                showStatus("Сокет открыт; сервер прислал session.created. Проверка 10 секунд…")
+                                startProbeTimer(webSocket)
+                            } else {
+                                lastPhase = "session.created; отправляем минимальные настройки"
+                                sendSessionSetup(webSocket)
+                            }
                         }
                         "session.updated" -> {
-                            lastPhase = "Получено session.updated; запускаем аудио"
-                            sessionReady = true
-                            startAudio()
-                            showStatus("🟢 Qwen Live: говори естественно, можно перебивать. " +
-                                "Для фото нажми кнопку, затем задай вопрос.")
+                            lastPhase = "session.updated получено"
+                            appendTranscript("✓ session.updated; сервер подтвердил настройки")
+                            if (mode == TestMode.SETUP_ONLY) {
+                                finishProbe(webSocket, "✅ Проверка session.update прошла успешно!")
+                            } else if (mode == TestMode.REALTIME) {
+                                sessionReady = true
+                                startAudio()
+                                showStatus("🟢 Qwen Live: говори естественно, можно перебивать. " +
+                                    "Для фото нажми кнопку, затем задай вопрос.")
+                            }
                         }
                         "input_audio_buffer.speech_started" -> {
                             clearSpeaker()
@@ -228,6 +241,9 @@ class MainActivity : ComponentActivity() {
                             val code = e?.optString("code").orEmpty()
                             val message = e?.optString("message").orEmpty()
                             val param = e?.optString("param").orEmpty()
+                            appendTranscript("✗ error event; code: " + code.take(80) +
+                                "; param: " + param.take(80) +
+                                "; event_id: " + evt.optString("event_id").take(80))
                             lastApiError = "Qwen API: код ${code.take(60)}; параметр ${param.take(60)}; " +
                                 message.take(160)
                             lastPhase = "Сервер прислал error"
@@ -312,17 +328,39 @@ class MainActivity : ComponentActivity() {
         // Minimal official Qwen3.8 session config. PCM defaults: 16 kHz in, 24 kHz out.
         // Complex nested audio overrides are intentionally omitted until the first
         // successful session.updated event, to isolate protocol vs network failures.
+        // Exact official minimal payload; no custom instructions or audio overrides.
         val session = JSONObject()
             .put("modalities", JSONArray().put("text").put("audio"))
             .put("voice", "Tina")
             .put("turn_detection", JSONObject().put("type", "server_vad"))
-            .put("instructions", "Ты русскоязычный ассистент умных очков. " +
-                "Общайся естественно и кратко. Отвечай голосом. " +
-                "Когда пользователь присылает фотографию, обсуждай её содержимое.")
         val event = JSONObject().put("type", "session.update").put("session", session)
-        ws.send(event.toString())
-        lastSocketEvent = "session.update отправлен"
-        showStatus("Сервер подтвердил session.created. Отправил session.update…")
+        val sent = ws.send(event.toString())
+        lastSocketEvent = if (sent) "session.update отправлен" else "ws.send вернул false"
+        lastPhase = lastSocketEvent
+        appendTranscript("→ " + lastSocketEvent)
+        showStatus("Ждём session.updated после минимального session.update…")
+    }
+
+    private fun startProbeTimer(ws: WebSocket) {
+        probeTimer = Thread({
+            try {
+                Thread.sleep(10000)
+            } catch (_: InterruptedException) {
+                return@Thread
+            }
+            if (socket === ws && mode == TestMode.CONNECT_ONLY) {
+                finishProbe(ws, "✅ WebSocket оставался открытым 10 секунд БЕЗ session.update.")
+            }
+        }, "QwenProbeTimer").apply { start() }
+    }
+
+    private fun finishProbe(ws: WebSocket, result: String) {
+        runOnUiThread {
+            if (socket === ws) {
+                appendTranscript(result)
+                disconnect(result)
+            }
+        }
     }
 
     private fun startAudio() {
@@ -457,6 +495,8 @@ class MainActivity : ComponentActivity() {
         recording = false
         sessionReady = false
         responding = false
+        probeTimer?.interrupt()
+        probeTimer = null
         try { recorder?.stop() } catch (_: Exception) {}
         playing = false
         audioQueue.clear()
