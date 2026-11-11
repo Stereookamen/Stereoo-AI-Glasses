@@ -1,26 +1,29 @@
-# Stereoo AI Glasses — прототип 0.1
+# Stereoo LiveKit • Gemini Live (TEST)
 
-Первый Android-прототип: распознавание русской речи средствами Android, запрос к OpenAI Responses API, выбор фотографии из телефона, анализ изображения и озвучивание ответа через Text-to-Speech.
+Независимая тестовая сборка для Motorola moto g15. Цель: подключиться к уже развёрнутому LiveKit Agent с голосовой realtime-моделью Gemini Live, **без Android TTS**, проверить нормальный разговор на русском и перебивание.
 
-## Что уже предусмотрено
-- Android-проект на Kotlin.
-- Ввод вопроса голосом или текстом.
-- Выбор фотографии из галереи и отправка вместе с вопросом.
-- Озвучивание ответа по-русски.
-- GitHub Actions для сборки debug APK.
+- Пакет: `ru.stereoo.livekitpilot`. Устанавливается отдельно от основного Stereoo AI Glasses.
+- SDK: `io.livekit:livekit-android:2.30.0`.
+- Агент по умолчанию: `assistant-1c7e` (его имя, не Agent ID).
+- Не нужно указывать LiveKit WebSocket URL вручную: `TokenSource.fromDevelopmentTokenServer` выдаёт `serverUrl` и `participantToken` вместе.
+- Каждый запуск: новая комната `stereoo-<uuid>`; токен включает explicit agent dispatch через `TokenRequestOptions(agentName=...)`.
+- Микрофон: `setMicrophoneEnabled(true)`. Аудио агента SDK воспроизводит автоматически.
+- Никаких `LIVEKIT_API_KEY`, `API_SECRET`, Google API Key или платёжных ключей в APK нет.
 
-## Чего пока нет
-- Прямого перехвата кнопки очков BV200.
-- Получения снимка непосредственно из приложения производителя.
-- Полноценного потокового голосового разговора.
-- Проверки на физическом устройстве и сборки в этой среде.
+## Испытание
 
-Эти функции нужно добавить после изучения Bluetooth/Intent-потока CyanBridge и проверки на очках.
+1. LiveKit Cloud → проект Glasses → Settings → Project settings → Development token server → включить, скопировать **Token server ID**.
+2. Открыть test APK, ввести **Token server ID** только локально на телефоне. Не путать с Agent ID.
+3. Проверь имя агента в Overview, по умолчанию `assistant-1c7e`.
+4. Нажать «Начать разговор», разрешить микрофон. Проверить двухстороннюю речь.
+5. Перебить ответ; закончить разговор кнопкой «Завершить».
+6. Проверить Usage в LiveKit и затем выключить development token server в консоли.
 
-## Сборка
-Откройте папку в Android Studio и запустите сборку `assembleDebug`, либо загрузите проект в GitHub и запустите workflow **Android APK**.
+Тариф LiveKit и Realtime-модели может расходовать бесплатные кредиты или приводить к платным расходам.
 
-## API-ключ
-Для запросов нужен API-ключ OpenAI с доступом к API. Он вводится в приложении и не вшит в исходный код. Это тестовая реализация: для распространения приложения лучше использовать собственный сервер-посредник, чтобы не хранить секреты в клиенте.
+**Обязательно до производства**: безопасный authenticated token endpoint на сервере, Foreground Service и Bluetooth-маршрутизация к BV200 с выключенным экраном, нижняя кнопка/фотографии, голосовые команды, долгосрочная память. Текущий тест не претендует на их поддержку.
 
-Не публикуйте API-ключ и не загружайте его в GitHub.
+Docs:
+- https://docs.livekit.io/frontends/build/authentication/development-token-server/
+- https://docs.livekit.io/frontends/build/authentication/
+- https://github.com/livekit/client-sdk-android
