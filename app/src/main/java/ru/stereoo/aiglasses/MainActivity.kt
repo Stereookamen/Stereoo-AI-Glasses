@@ -54,18 +54,21 @@ class MainActivity : ComponentActivity() {
             textSize = size
             setPadding(0, 0, 0, 12)
         }
-        root.addView(label("Stereoo | Независимая проверка Qwen", 22f))
+        root.addView(label("Stereoo | Независимая проверка Qwen v2", 22f))
         root.addView(label(
             "ДРУГОЙ WebSocket-клиент. Не использует OkHttp. Только проверяет подключение " +
                 "и session.update, без микрофона, фото и BV200.", 14f))
         workspaceInput = EditText(this).apply {
-            hint = "Workspace ID (Singapore)"
+            hint = "Workspace ID (Singapore, скрыт)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO
             isSingleLine = true
         }
         root.addView(workspaceInput)
         secretInput = EditText(this).apply {
             hint = "API key Singapore (скрыт)"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO
             isSingleLine = true
         }
         root.addView(secretInput)
@@ -190,7 +193,38 @@ class MainActivity : ComponentActivity() {
                                     "; param=" + param.take(80))
                                 finish(ownId, "Ошибка API: " + code.take(100))
                             }
-                            else -> record("Событие сервера: " + eventType.take(80))
+                            else -> {
+                                record("Событие сервера: " + eventType.take(80))
+                                if (eventType == "(без type)" || eventType.isBlank()) {
+                                    record("⚠ JSON без поля type. Диагностика структуры:")
+                                    val keys = ArrayList<String>()
+                                    val iter = json.keys()
+                                    while (iter.hasNext()) keys.add(iter.next())
+                                    record("Верхние поля: " + keys.sorted().joinToString(", ").take(200))
+                                    val nested = listOf("header", "error", "data", "output")
+                                    for (field in nested) {
+                                        val obj = json.optJSONObject(field) ?: continue
+                                        val names = ArrayList<String>()
+                                        val it = obj.keys()
+                                        while (it.hasNext()) names.add(it.next())
+                                        record("$field содержит: " + names.sorted().joinToString(", ").take(170))
+                                    }
+                                    val objects = mutableListOf(json)
+                                    for (field in nested) json.optJSONObject(field)?.let { objects.add(it) }
+                                    for (obj in objects) {
+                                        val code = listOf("code", "error_code", "status", "event", "errorType")
+                                            .firstNotNullOfOrNull { name ->
+                                                obj.optString(name).takeIf { it.isNotBlank() }
+                                            }
+                                        if (code != null) record("Код/событие: " + hideSecrets(code, workspace, key).take(130))
+                                        val msg = listOf("message", "error_message", "msg")
+                                            .firstNotNullOfOrNull { name ->
+                                                obj.optString(name).takeIf { it.isNotBlank() }
+                                            }
+                                        if (msg != null) record("Сообщение: " + hideSecrets(msg, workspace, key).take(240))
+                                    }
+                                }
+                            }
                         }
                     }
                 } catch (e: Exception) {
@@ -223,6 +257,18 @@ class MainActivity : ComponentActivity() {
         client = ws
         ws.connect()
         scheduleTimeout(ownId, 18000, "сессия не завершилась за 18 секунд")
+    }
+
+    private fun hideSecrets(raw: String, workspace: String, key: String): String {
+        var out = raw
+        if (key.isNotBlank()) out = out.replace(key, "[КЛЮЧ]")
+        if (workspace.isNotBlank()) out = out.replace(workspace, "[WORKSPACE]")
+        out = out.replace(Regex("(?i)Bearer\\s+[^\\s\\\",}]+"), "Bearer [СКРЫТО]")
+        out = out.replace(Regex("(?i)sk-[A-Za-z0-9_-]{8,}"), "[КЛЮЧ]")
+        out = out.replace(Regex("(?i)ws-[A-Za-z0-9_-]{8,}"), "[WORKSPACE]")
+        out = out.replace(Regex("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}"), "[EMAIL]")
+        out = out.replace(Regex("[\\r\\n\\t]+"), " ")
+        return out
     }
 
     private fun scheduleTimeout(id: Int, delayMs: Long, label: String) {
