@@ -50,6 +50,7 @@ object StereooSession {
  *
  * The real LiveKit agent runs on the remote cloud project, NOT inside this APK.
  */
+@OptIn(io.livekit.android.annotations.Beta::class)
 class VoiceSessionService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var room: Room? = null
