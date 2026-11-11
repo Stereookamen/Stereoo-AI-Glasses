@@ -6,11 +6,11 @@ android {
     namespace = "ru.stereoo.aiglasses"
     compileSdk = 35
     defaultConfig {
-        applicationId = "ru.stereoo.aiglasses.qwenpilot"
+        applicationId = "ru.stereoo.aiglasses.qwenprobe"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "qwen-omni-realtime-pilot-1"
+        versionCode = 4
+        versionName = "qwen-omni-realtime-probe-4"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
