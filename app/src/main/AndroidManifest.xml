@@ -4,7 +4,7 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <application
         android:allowBackup="false"
-        android:label="Stereoo Qwen Live TEST"
+        android:label="Stereoo Qwen Probe v4"
         android:supportsRtl="true"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
         <activity android:name="ru.stereoo.aiglasses.MainActivity" android:exported="true">
