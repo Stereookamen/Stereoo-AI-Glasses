@@ -55,6 +55,10 @@ class MainActivity : ComponentActivity() {
     @Volatile private var lastPhase = "Подключение не начато"
     @Volatile private var lastApiError = ""
     @Volatile private var everOpened = false
+    private enum class TestMode { CONNECT_ONLY, SETUP_ONLY, REALTIME }
+    @Volatile private var mode = TestMode.REALTIME
+    private var probeTimer: Thread? = null
+
     private var recorder: AudioRecord? = null
     private var speaker: AudioTrack? = null
     private var micThread: Thread? = null
@@ -63,7 +67,7 @@ class MainActivity : ComponentActivity() {
 
     private val permission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) connect() else showStatus("Разреши использование микрофона.")
+            if (granted) connect(TestMode.REALTIME) else showStatus("Разреши использование микрофона.")
         }
 
     private val photoPicker =
@@ -99,7 +103,15 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(apiKeyField)
         root.addView(Button(this).apply {
-            text = "🎙 Начать настоящий Realtime"
+            text = "1. Проверить сокет (без настроек)"
+            setOnClickListener { connect(TestMode.CONNECT_ONLY) }
+        })
+        root.addView(Button(this).apply {
+            text = "2. Проверить session.update (без микрофона)"
+            setOnClickListener { connect(TestMode.SETUP_ONLY) }
+        })
+        root.addView(Button(this).apply {
+            text = "3. 🎙 Начать настоящий Realtime"
             setOnClickListener { requestPermissionAndConnect() }
         })
         root.addView(Button(this).apply {
@@ -129,11 +141,18 @@ class MainActivity : ComponentActivity() {
     private fun requestPermissionAndConnect() {
         if (sessionReady || socket != null) return
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-            == PackageManager.PERMISSION_GRANTED) connect()
+            == PackageManager.PERMISSION_GRANTED) connect(TestMode.REALTIME)
         else permission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    private fun connect() {
+    private fun connect(testMode: TestMode) {
+        if (socket != null) {
+            showStatus("Сначала завершите текущий тест.")
+            return
+        }
+        mode = testMode
+        transcript.text = ""
+        appendTranscript("Режим теста: " + mode.name)
         val workspace = workspaceField.text.toString().trim().lowercase()
         val key = apiKeyField.text.toString().trim()
         // ID is placed in hostname; strict validation avoids URLs with arbitrary hosts.
