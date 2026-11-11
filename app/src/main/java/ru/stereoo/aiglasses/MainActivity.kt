@@ -199,12 +199,11 @@ class MainActivity : ComponentActivity() {
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                // Don't echo exception strings: on some clients they may contain auth data.
+                // Classify the network failure WITHOUT logging the URL or API key.
+                // A null HTTP response usually means DNS / TLS / network, not an API key denial.
+                val category = classifyConnectionFailure(t, response?.code)
                 runOnUiThread {
-                    if (socket === webSocket) {
-                        disconnect("Не подключилось (HTTP ${response?.code ?: "нет ответа"}). " +
-                            "Проверь регион Singapore, Workspace ID, API key и доступ.")
-                    }
+                    if (socket === webSocket) disconnect(category)
                 }
             }
 
@@ -215,6 +214,38 @@ class MainActivity : ComponentActivity() {
                 }
             }
         })
+    }
+
+    private fun classifyConnectionFailure(error: Throwable, code: Int?): String {
+        if (code != null) {
+            return when (code) {
+                401 -> "HTTP 401: API-ключ отклонён. Проверь ключ Singapore."
+                403 -> "HTTP 403: доступ или квота запрещены. Проверь лимиты и разрешения."
+                404 -> "HTTP 404: проверь Workspace ID и адрес регионального API."
+                429 -> "HTTP 429: слишком много запросов. Проверь лимиты в кабинете."
+                else -> "Ответ сервера HTTP $code. Проверь регион, Workspace ID и статус модели."
+            }
+        }
+        var cause: Throwable = error
+        while (cause.cause != null && cause.cause !== cause) cause = cause.cause!!
+        // Intentionally omit cause.message: it may contain the request URL or other details.
+        return when (cause) {
+            is java.net.UnknownHostException ->
+                "Ошибка DNS: адрес сервера не найден. Проверь Workspace ID и доступность сети через VPN."
+            is javax.net.ssl.SSLException ->
+                "Ошибка TLS: не удалось установить защищённое соединение. Проверь сеть, дату и VPN."
+            is java.net.SocketTimeoutException ->
+                "Таймаут: сервер не отвечает. Попробуй Wi-Fi и другой режим VPN."
+            is java.net.ConnectException ->
+                "Соединение отклонено. Проверь сеть и доступность сервера через VPN."
+            is java.net.SocketException ->
+                "Соединение оборвалось. Попробуй переключить Wi-Fi/4G или VPN."
+            is java.net.ProtocolException ->
+                "Ошибка WebSocket-протокола до соединения."
+            else ->
+                "Ошибка подключения до ответа HTTP: ${cause.javaClass.simpleName}. " +
+                    "Проверь Workspace ID, регион и VPN."
+        }
     }
 
     private fun sendSessionSetup(ws: WebSocket) {
