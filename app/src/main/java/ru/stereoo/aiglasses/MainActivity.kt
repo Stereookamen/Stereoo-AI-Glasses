@@ -51,6 +51,9 @@ class MainActivity : ComponentActivity() {
     @Volatile private var recording = false
     @Volatile private var playing = false
     @Volatile private var responding = false
+    @Volatile private var lastPhase = "Подключение не начато"
+    @Volatile private var lastApiError = ""
+    @Volatile private var everOpened = false
     private var recorder: AudioRecord? = null
     private var speaker: AudioTrack? = null
     private var micThread: Thread? = null
@@ -91,6 +94,7 @@ class MainActivity : ComponentActivity() {
             hint = "Alibaba Model Studio API key"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
             isSingleLine = true
+            transformationMethod = android.text.method.PasswordTransformationMethod.getInstance()
         }
         root.addView(apiKeyField)
         root.addView(Button(this).apply {
@@ -146,18 +150,27 @@ class MainActivity : ComponentActivity() {
             .url(endpoint)
             .header("Authorization", "Bearer $key")
             .build()
+        lastPhase = "Подключаюсь к серверу"
+        lastApiError = ""
+        everOpened = false
         showStatus("Подключаюсь к Qwen-Omni-Realtime…")
         socket = http.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
-                showStatus("Сокет открыт, ожидаю session.created…")
+                everOpened = true
+                lastPhase = "WebSocket открыт; ожидаем session.created"
+                showStatus(lastPhase)
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val evt = JSONObject(text)
                     when (evt.optString("type")) {
-                        "session.created" -> sendSessionSetup(webSocket)
+                        "session.created" -> {
+                            lastPhase = "Получено session.created; отправляем настройки"
+                            sendSessionSetup(webSocket)
+                        }
                         "session.updated" -> {
+                            lastPhase = "Получено session.updated; запускаем аудио"
                             sessionReady = true
                             startAudio()
                             showStatus("🟢 Qwen Live: говори естественно, можно перебивать. " +
@@ -190,7 +203,11 @@ class MainActivity : ComponentActivity() {
                             val e = evt.optJSONObject("error")
                             val code = e?.optString("code").orEmpty()
                             val message = e?.optString("message").orEmpty()
-                            showStatus("Ошибка Qwen: ${code.take(70)} ${message.take(180)}")
+                            val param = e?.optString("param").orEmpty()
+                            lastApiError = "Qwen API: код ${code.take(60)}; параметр ${param.take(60)}; " +
+                                message.take(160)
+                            lastPhase = "Сервер прислал error"
+                            showStatus(lastApiError)
                         }
                     }
                 } catch (_: Exception) {
@@ -198,19 +215,32 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
+            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                // If the server initiates a clean close, the close code is diagnostic.
+                lastPhase = "Сервер начал закрывать WebSocket, код $code"
+                showStatus(lastPhase)
+                webSocket.close(code, null)
+            }
+
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                // Classify the network failure WITHOUT logging the URL or API key.
-                // A null HTTP response usually means DNS / TLS / network, not an API key denial.
-                val category = classifyConnectionFailure(t, response?.code)
+                // A WebSocket can open successfully but fail later. Keep the last known stage.
+                val diagnostic = if (lastApiError.isNotBlank()) {
+                    lastApiError
+                } else {
+                    classifyConnectionFailure(t, response?.code) + " | Этап: $lastPhase"
+                }
                 runOnUiThread {
-                    if (socket === webSocket) disconnect(category)
+                    if (socket === webSocket) disconnect(diagnostic)
                 }
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 runOnUiThread {
-                    if (socket === webSocket)
-                        disconnect("Сессия закрыта (код $code): ${reason.take(100)}")
+                    if (socket === webSocket) {
+                        val diagnostic = if (lastApiError.isNotBlank()) lastApiError
+                            else "WebSocket закрыт, код $code; этап: $lastPhase"
+                        disconnect(diagnostic)
+                    }
                 }
             }
         })
@@ -242,36 +272,30 @@ class MainActivity : ComponentActivity() {
                 "Соединение оборвалось. Попробуй переключить Wi-Fi/4G или VPN."
             is java.net.ProtocolException ->
                 "Ошибка WebSocket-протокола до соединения."
+            is java.io.EOFException ->
+                if (everOpened) "Сервер/сеть оборвали WebSocket после открытия (EOF)."
+                else "Сервер/сеть оборвали соединение до открытия WebSocket (EOF)."
             else ->
-                "Ошибка подключения до ответа HTTP: ${cause.javaClass.simpleName}. " +
-                    "Проверь Workspace ID, регион и VPN."
+                "Сбой соединения: ${cause.javaClass.simpleName}. " +
+                    "Проверь настройки и доступность сервера."
         }
     }
 
     private fun sendSessionSetup(ws: WebSocket) {
-        // Qwen3.8 WebSocket uses nested input/output PCM format.
-        val inputFormat = JSONObject().put("type", "pcm")
-            .put("sample_rate", 16000).put("sample_format", "s16le")
-            .put("channels", 1).put("packing", "interleaved")
-            .put("channel_layout", "mono")
-        val audio = JSONObject()
-            .put("input", JSONObject().put("format", inputFormat))
-            .put("output", JSONObject().put("voice", "Tina")
-                .put("format", JSONObject().put("type", "pcm").put("sample_rate", 24000)))
+        // Use the exact minimal example from Alibaba's Qwen3.8 WebSocket docs.
+        // In particular, do not send prefix_padding_ms (not supported by this model).
         val session = JSONObject()
             .put("modalities", JSONArray().put("text").put("audio"))
-            .put("instructions", "Ты голосовой помощник в умных очках. " +
-                "Общайся естественно и дружелюбно на русском языке, не читай текст роботом. " +
-                "Отвечай кратко. Когда пользователь присылает фотографию, " +
-                "обсуждай именно изображение и помни контекст разговора.")
-            .put("turn_detection", JSONObject()
-                .put("type", "semantic_vad_ec")
-                .put("threshold", 0.5)
-                .put("prefix_padding_ms", 500)
-                .put("silence_duration_ms", 800))
-            .put("audio", audio)
-        val command = JSONObject().put("type", "session.update").put("session", session)
-        ws.send(command.toString())
+            .put("voice", "Tina")
+            .put("turn_detection", JSONObject().put("type", "server_vad"))
+            .put("instructions", "Ты голосовой помощник на русском языке. " +
+                "Разговаривай естественно, коротко и понятно. " +
+                "Можешь обсуждать изображения в том же диалоге.")
+        val event = JSONObject().put("type", "session.update").put("session", session)
+        val sent = ws.send(event.toString())
+        lastPhase = if (sent) "Отправлено session.update; ожидаем session.updated"
+            else "Ошибка отправки session.update"
+        showStatus(lastPhase)
     }
 
     private fun startAudio() {
