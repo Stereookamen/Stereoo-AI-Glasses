@@ -8,11 +8,12 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "ru.stereoo.aiglasses"
+        // Отдельная тестовая установка. Не заменяет работающий Stereoo AI.
+        applicationId = "ru.stereoo.aiglasses.geminipilot"
         minSdk = 26
         targetSdk = 35
         versionCode = 1
-        versionName = "1.0"
+        versionName = "gemini-live-pilot-1"
     }
 
     compileOptions {
@@ -29,4 +30,5 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.activity:activity-ktx:1.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 }
