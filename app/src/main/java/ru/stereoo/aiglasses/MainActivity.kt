@@ -1,206 +1,279 @@
 package ru.stereoo.aiglasses
 
-import android.app.Activity
+import android.app.AlertDialog
 import android.os.Bundle
-import android.content.Intent
-import android.speech.tts.TextToSpeech
-import android.speech.RecognizerIntent
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.widget.*
-import android.view.ViewGroup
+import android.os.Handler
+import android.os.Looper
+import android.text.InputType
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.activity.ComponentActivity
-import androidx.activity.result.contract.ActivityResultContracts
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.Locale
-import org.json.JSONObject
+import org.java_websocket.client.WebSocketClient
+import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONArray
-import android.util.Base64
-import kotlin.concurrent.thread
+import org.json.JSONObject
+import java.net.URI
+import java.util.concurrent.atomic.AtomicInteger
 
-class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+/**
+ * Completely independent wire-level probe for Qwen3.8-Omni-Flash-Realtime.
+ * Uses Java-WebSocket instead of the OkHttp stack in Stereoo Qwen Live.
+ *
+ * TEST ONLY. Never embeds, persists or logs the API key. No microphone permission,
+ * no audio and no images. It measures only session.created / session.updated.
+ */
+class MainActivity : ComponentActivity() {
+    private enum class Mode { SOCKET_ONLY, SESSION_UPDATE }
 
-    private lateinit var question: EditText
-    private lateinit var answer: TextView
-    private lateinit var speech: TextToSpeech
-    private var imageUri: Uri? = null
-    private var apiKey = ""
-
-    private val imagePicker =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            imageUri = uri
-            if (uri != null) answer.text = "Фотография выбрана."
-        }
-
-    private val voiceInput =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
-                val text = result.data
-                    ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                    ?.firstOrNull()
-                if (!text.isNullOrBlank()) {
-                    question.setText(text)
-                    sendQuestion()
-                }
-            }
-        }
+    private val ui = Handler(Looper.getMainLooper())
+    private val serial = AtomicInteger(0)
+    private var client: WebSocketClient? = null
+    private var activeId = 0
+    private var mode = Mode.SOCKET_ONLY
+    private lateinit var workspaceInput: EditText
+    private lateinit var secretInput: EditText
+    private lateinit var logText: TextView
+    private lateinit var stateText: TextView
+    private var createdAt = 0L
+    private var updateSentAt = 0L
+    private var stage = "не начато"
+    private var done = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        speech = TextToSpeech(this, this)
-
-        val layout = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 32, 28, 24)
+            setPadding(30, 32, 30, 24)
         }
-
-        layout.addView(TextView(this).apply {
-            text = "Stereoo AI Glasses"
-            textSize = 26f
+        fun label(text: String, size: Float = 17f): TextView = TextView(this).apply {
+            this.text = text
+            textSize = size
+            setPadding(0, 0, 0, 12)
+        }
+        root.addView(label("Stereoo | Независимая проверка Qwen", 22f))
+        root.addView(label(
+            "ДРУГОЙ WebSocket-клиент. Не использует OkHttp. Только проверяет подключение " +
+                "и session.update, без микрофона, фото и BV200.", 14f))
+        workspaceInput = EditText(this).apply {
+            hint = "Workspace ID (Singapore)"
+            isSingleLine = true
+        }
+        root.addView(workspaceInput)
+        secretInput = EditText(this).apply {
+            hint = "API key Singapore (скрыт)"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            isSingleLine = true
+        }
+        root.addView(secretInput)
+        root.addView(label(
+            "ВНИМАНИЕ: квота для Qwen3.8 может отсутствовать. " +
+                "Тесты могут быть платными. Ключ никуда не сохраняется.", 14f))
+        root.addView(Button(this).apply {
+            text = "1. Проверить WebSocket без настроек"
+            setOnClickListener { confirmAndRun(Mode.SOCKET_ONLY) }
         })
-
-        question = EditText(this).apply {
-            hint = "Напиши вопрос..."
-            minLines = 2
+        root.addView(Button(this).apply {
+            text = "2. Отправить session.update без микрофона"
+            setOnClickListener { confirmAndRun(Mode.SESSION_UPDATE) }
+        })
+        root.addView(Button(this).apply {
+            text = "Остановить тест"
+            setOnClickListener { stop("Остановлено пользователем") }
+        })
+        stateText = label("Готов к проверке.", 16f)
+        root.addView(stateText)
+        logText = TextView(this).apply {
+            textSize = 15f
+            setTextIsSelectable(true)
+            text = "Журнал событий появится здесь. Секретный ключ не выводится."
         }
-        layout.addView(question)
-
-        val askButton = Button(this).apply {
-            text = "Отправить вопрос"
-            setOnClickListener { sendQuestion() }
-        }
-        layout.addView(askButton)
-
-        val voiceButton = Button(this).apply {
-            text = "🎙 Говорить"
-            setOnClickListener { startVoiceInput() }
-        }
-        layout.addView(voiceButton)
-
-        val photoButton = Button(this).apply {
-            text = "📷 Выбрать фотографию"
-            setOnClickListener { imagePicker.launch("image/*") }
-        }
-        layout.addView(photoButton)
-
-        answer = TextView(this).apply {
-            text = "Готов к работе. Для запросов нужен API-ключ OpenAI."
-            textSize = 17f
-        }
-        layout.addView(answer)
-
-        setContentView(ScrollView(this).apply { addView(layout) })
+        root.addView(logText)
+        setContentView(ScrollView(this).apply { addView(root) })
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            speech.language = Locale("ru", "RU")
-        }
-    }
-
-    private fun startVoiceInput() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Говори")
-        }
-
-        try {
-            voiceInput.launch(intent)
-        } catch (e: Exception) {
-            answer.text = "Голосовой ввод недоступен на устройстве."
-        }
-    }
-
-    private fun sendQuestion() {
-        val text = question.text.toString().trim()
-        if (text.isEmpty() && imageUri == null) {
-            answer.text = "Сначала введи вопрос или выбери фотографию."
+    private fun confirmAndRun(requested: Mode) {
+        val ws = workspaceInput.text.toString().trim().lowercase()
+        val key = secretInput.text.toString().trim()
+        if (!Regex("ws-[a-z0-9-]{8,90}").matches(ws) || key.isBlank()) {
+            stateText.text = "Проверь Workspace ID (начинается с ws-) и API-ключ Singapore."
             return
         }
+        AlertDialog.Builder(this)
+            .setTitle("Проверка Qwen API")
+            .setMessage("У этой модели может не быть бесплатной квоты. " +
+                "Подключение может учитываться в платном использовании. Продолжить?")
+            .setNegativeButton("Отмена", null)
+            .setPositiveButton("Проверить") { _, _ -> start(requested, ws, key) }
+            .show()
+    }
 
-        if (apiKey.isBlank()) {
-            answer.text = "Пока не подключён API-ключ OpenAI. Добавим безопасную настройку позже."
-            return
-        }
+    private fun start(selected: Mode, workspace: String, key: String) {
+        stop(null)
+        activeId = serial.incrementAndGet()
+        val ownId = activeId
+        mode = selected
+        done = false
+        stage = "начало подключения"
+        createdAt = 0L
+        updateSentAt = 0L
+        logText.text = ""
+        record("Режим: " + mode.name)
+        record("Клиент: Java-WebSocket 1.6.0 (не OkHttp)")
+        record("Регион: Singapore; модель: qwen3.8-omni-flash-realtime")
+        record("API-ключ и Workspace ID не выводятся.")
+        stateText.text = "Подключаюсь…"
 
-        answer.text = "Отправляю запрос..."
-
-        thread {
-            try {
-                val connection = URL("https://api.openai.com/v1/responses")
-                    .openConnection() as HttpURLConnection
-
-                connection.requestMethod = "POST"
-                connection.setRequestProperty("Authorization", "Bearer $apiKey")
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.connectTimeout = 20000
-                connection.readTimeout = 60000
-                connection.doOutput = true
-
-                val input = JSONObject()
-                input.put("model", "gpt-4.1-mini")
-                input.put("input", text)
-
-                connection.outputStream.use {
-                    it.write(input.toString().toByteArray(Charsets.UTF_8))
-                }
-
-                val responseCode = connection.responseCode
-                val stream = if (responseCode in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream
-                }
-
-                val response = stream.bufferedReader().use { it.readText() }
-
-                if (responseCode !in 200..299) {
-                    throw Exception("Ошибка API: HTTP $responseCode")
-                }
-
-                val json = JSONObject(response)
-                val output = json.optJSONArray("output") ?: JSONArray()
-                val result = StringBuilder()
-
-                for (i in 0 until output.length()) {
-                    val item = output.optJSONObject(i) ?: continue
-                    val content = item.optJSONArray("content") ?: continue
-
-                    for (j in 0 until content.length()) {
-                        val part = content.optJSONObject(j) ?: continue
-                        if (part.optString("type") == "output_text") {
-                            result.append(part.optString("text"))
-                        }
-                    }
-                }
-
-                val message = result.toString().ifBlank {
-                    "Не удалось получить текстовый ответ."
-                }
-
-                runOnUiThread {
-                    answer.text = message
-                    speech.speak(message, TextToSpeech.QUEUE_FLUSH, null, "answer")
-                }
-
-                connection.disconnect()
-            } catch (e: Exception) {
-                runOnUiThread {
-                    answer.text = "Не удалось отправить запрос: ${e.message}"
+        val uri = URI("wss://$workspace.ap-southeast-1.maas.aliyuncs.com/" +
+            "api-ws/v1/realtime?model=qwen3.8-omni-flash-realtime")
+        val headers = mapOf("Authorization" to "Bearer $key")
+        // Official minimal sequence: open -> session.created -> session.update -> session.updated.
+        val ws = object : WebSocketClient(uri, headers, 10000) {
+            override fun onOpen(handshake: ServerHandshake) {
+                post(ownId) {
+                    stage = "WebSocket открыт"
+                    record("✓ WebSocket открыт (HTTP ${handshake.httpStatus})")
+                    stateText.text = "Открыто. Ждём session.created…"
                 }
             }
+
+            override fun onMessage(message: String) {
+                try {
+                    val json = JSONObject(message)
+                    val eventType = json.optString("type", "(без type)")
+                    post(ownId) {
+                        if (done) return@post
+                        stage = eventType.take(72)
+                        when (eventType) {
+                            "session.created" -> {
+                                createdAt = android.os.SystemClock.elapsedRealtime()
+                                val model = json.optJSONObject("session")?.optString("model")
+                                record("✓ session.created; model=" + (model ?: "?").take(64))
+                                if (selected == Mode.SOCKET_ONLY) {
+                                    stateText.text = "Сессия создана. Проверяю 8 секунд БЕЗ настроек…"
+                                    scheduleTimeout(ownId, 8000, "8 секунд без session.update")
+                                } else {
+                                    val payload = JSONObject().put("type", "session.update")
+                                        .put("session", JSONObject()
+                                            .put("modalities", JSONArray().put("text").put("audio"))
+                                            .put("voice", "Tina")
+                                            .put("turn_detection",
+                                                JSONObject().put("type", "server_vad")))
+                                    try {
+                                        updateSentAt = android.os.SystemClock.elapsedRealtime()
+                                        send(payload.toString())
+                                        stage = "отправили session.update"
+                                        record("→ Отправлено минимальное session.update")
+                                        stateText.text = "Ожидаю session.updated…"
+                                        scheduleTimeout(ownId, 8000, "8 секунд без session.updated")
+                                    } catch (e: Exception) {
+                                        finish(ownId, "Ошибка отправки session.update: " +
+                                            e.javaClass.simpleName)
+                                    }
+                                }
+                            }
+                            "session.updated" -> {
+                                val ms = if (updateSentAt > 0L)
+                                    android.os.SystemClock.elapsedRealtime() - updateSentAt else -1L
+                                record("✓ session.updated, задержка ${ms} мс")
+                                finish(ownId, "✅ УСПЕШНО: сервер принял session.update.")
+                            }
+                            "error" -> {
+                                val err = json.optJSONObject("error")
+                                // Log code and param only; model error text could contain sensitive data.
+                                val code = err?.optString("code", "?").orEmpty()
+                                val param = err?.optString("param", "?").orEmpty()
+                                record("✗ Сервер прислал error: code=" + code.take(90) +
+                                    "; param=" + param.take(80))
+                                finish(ownId, "Ошибка API: " + code.take(100))
+                            }
+                            else -> record("Событие сервера: " + eventType.take(80))
+                        }
+                    }
+                } catch (e: Exception) {
+                    post(ownId) { record("Ошибка JSON: " + e.javaClass.simpleName) }
+                }
+            }
+
+            override fun onClose(code: Int, reason: String?, remote: Boolean) {
+                post(ownId) {
+                    if (done) return@post
+                    val elapsed = if (createdAt > 0L) {
+                        (android.os.SystemClock.elapsedRealtime() - createdAt).toString() + " мс"
+                    } else "не создавалась"
+                    record("✗ WebSocket закрылся: код=$code, " +
+                        "со стороны сервера=$remote, с создания сессии прошло $elapsed")
+                    // Do not print raw reason: it may contain details from a proxy or credentials.
+                    finish(ownId, "Закрыто: $code; этап: $stage")
+                }
+            }
+
+            override fun onError(ex: Exception) {
+                post(ownId) {
+                    if (done) return@post
+                    record("✗ Ошибка транспорта: " + ex.javaClass.simpleName)
+                    // No exception message: may contain Authorization header or URL.
+                    stateText.text = "Сбой транспорта: " + ex.javaClass.simpleName
+                }
+            }
+        }
+        client = ws
+        ws.connect()
+        scheduleTimeout(ownId, 18000, "сессия не завершилась за 18 секунд")
+    }
+
+    private fun scheduleTimeout(id: Int, delayMs: Long, label: String) {
+        ui.postDelayed({
+            if (activeId != id || done) return@postDelayed
+            record("⏱ Таймаут: $label")
+            if (label == "8 секунд без session.update" && stage == "session.created") {
+                finish(id, "✅ WebSocket держался 8 секунд без session.update.")
+            } else if (label == "8 секунд без session.updated" &&
+                stage == "отправили session.update") {
+                finish(id, "Нет ответа session.updated за 8 секунд.")
+            } else if (label == "сессия не завершилась за 18 секунд") {
+                finish(id, "Достигнут предел времени теста.")
+            }
+        }, delayMs)
+    }
+
+    private fun post(id: Int, task: () -> Unit) {
+        ui.post { if (activeId == id) task() }
+    }
+
+    private fun record(msg: String) {
+        // No secret values, URL, authorization header, full server JSON, or exception messages.
+        val prefix = java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.ROOT)
+            .format(java.util.Date())
+        val old = logText.text.toString()
+        logText.text = (old + "\n[$prefix] " + msg).trim().takeLast(6000)
+    }
+
+    private fun finish(id: Int, result: String) {
+        if (activeId != id || done) return
+        done = true
+        stateText.text = result
+        record("РЕЗУЛЬТАТ: $result")
+        try { client?.close() } catch (_: Exception) {}
+        client = null
+    }
+
+    private fun stop(message: String?) {
+        done = true
+        activeId = serial.incrementAndGet()
+        try { client?.close() } catch (_: Exception) {}
+        client = null
+        if (message != null) {
+            stateText.text = message
+            if (::logText.isInitialized) record(message)
         }
     }
 
     override fun onDestroy() {
-        speech.stop()
-        speech.shutdown()
+        stop(null)
+        secretInput.text.clear()
         super.onDestroy()
     }
 }
