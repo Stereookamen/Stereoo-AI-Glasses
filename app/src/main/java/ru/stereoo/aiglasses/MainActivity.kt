@@ -12,6 +12,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.ComponentActivity
 import org.java_websocket.client.WebSocketClient
+import org.java_websocket.drafts.Draft_6455
 import org.java_websocket.handshake.ServerHandshake
 import org.json.JSONArray
 import org.json.JSONObject
@@ -130,7 +131,7 @@ class MainActivity : ComponentActivity() {
             "api-ws/v1/realtime?model=qwen3.8-omni-flash-realtime")
         val headers = mapOf("Authorization" to "Bearer $key")
         // Official minimal sequence: open -> session.created -> session.update -> session.updated.
-        val ws = object : WebSocketClient(uri, headers, 10000) {
+        val ws = object : WebSocketClient(uri, Draft_6455(), headers, 10000) {
             override fun onOpen(handshake: ServerHandshake) {
                 post(ownId) {
                     stage = "WebSocket открыт"
