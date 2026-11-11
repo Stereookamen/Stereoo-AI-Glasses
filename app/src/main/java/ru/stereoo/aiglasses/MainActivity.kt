@@ -1,206 +1,227 @@
 package ru.stereoo.aiglasses
 
-import android.app.Activity
+import android.Manifest
+import android.content.pm.PackageManager
 import android.os.Bundle
-import android.content.Intent
-import android.speech.tts.TextToSpeech
-import android.speech.RecognizerIntent
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.widget.*
-import android.view.ViewGroup
+import android.text.InputType
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.Locale
-import org.json.JSONObject
-import org.json.JSONArray
-import android.util.Base64
-import kotlin.concurrent.thread
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import io.livekit.android.LiveKit
+import io.livekit.android.room.Room
+import io.livekit.android.events.collect
+import io.livekit.android.token.TokenSource
+import io.livekit.android.token.ConfigurableTokenSource
+import io.livekit.android.token.TokenRequestOptions
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
+import java.util.UUID
 
-class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+/**
+ * Stereoo • LiveKit test for Motorola moto g15.
+ * Standalone prototype: audio WebRTC + LiveKit Cloud agent dispatch.
+ * Agent: assistant-1c7e, deployed in Frankfurt / Google Gemini Live.
+ *
+ * No API key or secret is embedded in the application.
+ * Development token server IDs must never be used in a production release.
+ * No camera/BV200 button handling, lockscreen service or long-term memory yet.
+ */
+class MainActivity : ComponentActivity() {
+    private lateinit var tokenField: EditText
+    private lateinit var agentField: EditText
+    private lateinit var status: TextView
+    private lateinit var events: TextView
+    private var room: Room? = null
+    private var connecting: Job? = null
+    private var eventsJob: Job? = null
+    private var isConnected = false
+    private var micEnabled = true
 
-    private lateinit var question: EditText
-    private lateinit var answer: TextView
-    private lateinit var speech: TextToSpeech
-    private var imageUri: Uri? = null
-    private var apiKey = ""
-
-    private val imagePicker =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            imageUri = uri
-            if (uri != null) answer.text = "Фотография выбрана."
-        }
-
-    private val voiceInput =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
-                val text = result.data
-                    ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                    ?.firstOrNull()
-                if (!text.isNullOrBlank()) {
-                    question.setText(text)
-                    sendQuestion()
-                }
-            }
-        }
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { allowed ->
+        if (allowed) startCall() else setStatus("Без разрешения микрофона разговор невозможен.")
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        speech = TextToSpeech(this, this)
-
-        val layout = LinearLayout(this).apply {
+        val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 32, 28, 24)
+            setPadding(34, 26, 34, 26)
         }
-
-        layout.addView(TextView(this).apply {
-            text = "Stereoo AI Glasses"
-            textSize = 26f
+        fun label(content: String, size: Float = 16f): TextView =
+            TextView(this).apply {
+                text = content
+                textSize = size
+                setPadding(0, 8, 0, 10)
+            }
+        container.addView(label("Stereoo • LiveKit / Gemini Live", 23f))
+        container.addView(label(
+            "Тест настоящего Realtime через WebRTC.\n" +
+            "Для подключения нужен только Token server ID из LiveKit Cloud. " +
+            "API Key и API Secret не вводить!"
+        ))
+        container.addView(label("Token server ID (Settings → Project Settings):"))
+        tokenField = EditText(this).apply {
+            hint = "Скопируй Token server ID"
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT
+            importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO
+        }
+        container.addView(tokenField)
+        container.addView(label("Имя развёрнутого агента:"))
+        agentField = EditText(this).apply {
+            setText("assistant-1c7e")
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        container.addView(agentField)
+        container.addView(Button(this).apply {
+            text = "🎙 Начать разговор"
+            setOnClickListener { checkMicrophoneAndStart() }
         })
-
-        question = EditText(this).apply {
-            hint = "Напиши вопрос..."
-            minLines = 2
-        }
-        layout.addView(question)
-
-        val askButton = Button(this).apply {
-            text = "Отправить вопрос"
-            setOnClickListener { sendQuestion() }
-        }
-        layout.addView(askButton)
-
-        val voiceButton = Button(this).apply {
-            text = "🎙 Говорить"
-            setOnClickListener { startVoiceInput() }
-        }
-        layout.addView(voiceButton)
-
-        val photoButton = Button(this).apply {
-            text = "📷 Выбрать фотографию"
-            setOnClickListener { imagePicker.launch("image/*") }
-        }
-        layout.addView(photoButton)
-
-        answer = TextView(this).apply {
-            text = "Готов к работе. Для запросов нужен API-ключ OpenAI."
-            textSize = 17f
-        }
-        layout.addView(answer)
-
-        setContentView(ScrollView(this).apply { addView(layout) })
+        container.addView(Button(this).apply {
+            text = "🔇 Вкл. / выкл. микрофон"
+            setOnClickListener { toggleMicrophone() }
+        })
+        container.addView(Button(this).apply {
+            text = "⏹ Завершить"
+            setOnClickListener { endCall() }
+        })
+        status = label("Готово. Введи Token server ID и нажми «Начать разговор».")
+        container.addView(status)
+        events = label("", 13f).apply { setTextIsSelectable(true) }
+        container.addView(events)
+        container.addView(label(
+            "⚠ Только для тестов. Development token server позволяет получать " +
+            "неограниченные по разрешениям тестовые токены. После тестирования " +
+            "выключи его в LiveKit Cloud. Для рабочей версии нужен сервер " +
+            "с авторизацией пользователей и ограничением доступа."
+        , 13f))
+        setContentView(ScrollView(this).apply { addView(container) })
     }
 
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            speech.language = Locale("ru", "RU")
-        }
-    }
-
-    private fun startVoiceInput() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Говори")
-        }
-
-        try {
-            voiceInput.launch(intent)
-        } catch (e: Exception) {
-            answer.text = "Голосовой ввод недоступен на устройстве."
-        }
-    }
-
-    private fun sendQuestion() {
-        val text = question.text.toString().trim()
-        if (text.isEmpty() && imageUri == null) {
-            answer.text = "Сначала введи вопрос или выбери фотографию."
+    private fun checkMicrophoneAndStart() {
+        if (connecting != null || isConnected) {
+            setStatus("Сессия уже запущена.")
             return
         }
-
-        if (apiKey.isBlank()) {
-            answer.text = "Пока не подключён API-ключ OpenAI. Добавим безопасную настройку позже."
+        if (tokenField.text.toString().trim().isEmpty()) {
+            setStatus("Введи Token server ID, не Agent ID и не API Secret.")
             return
         }
+        if (agentField.text.toString().trim().isEmpty()) {
+            setStatus("Нужно имя агента из LiveKit Agent Overview.")
+            return
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else startCall()
+    }
 
-        answer.text = "Отправляю запрос..."
-
-        thread {
+    private fun startCall() {
+        if (connecting != null || isConnected) return
+        val tokenServerId = tokenField.text.toString().trim()
+        val agentName = agentField.text.toString().trim()
+        val sessionRoom = "stereoo-" + UUID.randomUUID().toString().substring(0, 12)
+        events.text = ""
+        setStatus("Запрашиваю временный токен…")
+        connecting = lifecycleScope.launch {
             try {
-                val connection = URL("https://api.openai.com/v1/responses")
-                    .openConnection() as HttpURLConnection
-
-                connection.requestMethod = "POST"
-                connection.setRequestProperty("Authorization", "Bearer $apiKey")
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.connectTimeout = 20000
-                connection.readTimeout = 60000
-                connection.doOutput = true
-
-                val input = JSONObject()
-                input.put("model", "gpt-4.1-mini")
-                input.put("input", text)
-
-                connection.outputStream.use {
-                    it.write(input.toString().toByteArray(Charsets.UTF_8))
-                }
-
-                val responseCode = connection.responseCode
-                val stream = if (responseCode in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream
-                }
-
-                val response = stream.bufferedReader().use { it.readText() }
-
-                if (responseCode !in 200..299) {
-                    throw Exception("Ошибка API: HTTP $responseCode")
-                }
-
-                val json = JSONObject(response)
-                val output = json.optJSONArray("output") ?: JSONArray()
-                val result = StringBuilder()
-
-                for (i in 0 until output.length()) {
-                    val item = output.optJSONObject(i) ?: continue
-                    val content = item.optJSONArray("content") ?: continue
-
-                    for (j in 0 until content.length()) {
-                        val part = content.optJSONObject(j) ?: continue
-                        if (part.optString("type") == "output_text") {
-                            result.append(part.optString("text"))
-                        }
+                val source = TokenSource.fromDevelopmentTokenServer(tokenServerId)
+                    as ConfigurableTokenSource
+                val response = source.fetch(
+                    TokenRequestOptions(
+                        roomName = sessionRoom,
+                        agentName = agentName,
+                        participantName = "Stereoo test"
+                    )
+                ).getOrThrow()
+                setStatus("Токен получен. Подключаю WebRTC…")
+                val newRoom = LiveKit.create(applicationContext)
+                room = newRoom
+                eventsJob = lifecycleScope.launch {
+                    newRoom.events.collect {
+                        showEvent(it.javaClass.simpleName)
                     }
                 }
-
-                val message = result.toString().ifBlank {
-                    "Не удалось получить текстовый ответ."
-                }
-
-                runOnUiThread {
-                    answer.text = message
-                    speech.speak(message, TextToSpeech.QUEUE_FLUSH, null, "answer")
-                }
-
-                connection.disconnect()
+                newRoom.connect(response.serverUrl, response.participantToken)
+                newRoom.localParticipant.setMicrophoneEnabled(true)
+                micEnabled = true
+                isConnected = true
+                setStatus("🟢 Подключено. Разговаривай с агентом. Если он не ответил, проверь Agent Overview.")
+                showEvent("Комната: $sessionRoom")
+                showEvent("Агент: $agentName")
+            } catch (_: CancellationException) {
+                // user stopped session
             } catch (e: Exception) {
-                runOnUiThread {
-                    answer.text = "Не удалось отправить запрос: ${e.message}"
-                }
+                setStatus("Ошибка подключения: ${e.message?.take(200) ?: e.javaClass.simpleName}")
+                disconnectRoom()
+            } finally {
+                connecting = null
             }
+        }
+    }
+
+    private fun toggleMicrophone() {
+        val r = room
+        if (r == null || !isConnected) {
+            setStatus("Сначала подключись к агенту.")
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                val newValue = !micEnabled
+                r.localParticipant.setMicrophoneEnabled(newValue)
+                micEnabled = newValue
+                setStatus(if (micEnabled) "🎙 Микрофон включён." else "🔇 Микрофон выключен.")
+            } catch (e: Exception) {
+                setStatus("Ошибка микрофона: " + (e.message ?: e.javaClass.simpleName))
+            }
+        }
+    }
+
+    private fun endCall() {
+        connecting?.cancel()
+        connecting = null
+        disconnectRoom()
+        setStatus("Разговор завершён.")
+    }
+
+    private fun disconnectRoom() {
+        eventsJob?.cancel()
+        eventsJob = null
+        val current = room
+        room = null
+        isConnected = false
+        micEnabled = true
+        lifecycleScope.launch {
+            try { current?.disconnect() } catch (_: Exception) {}
+            try { current?.release() } catch (_: Exception) {}
+        }
+    }
+
+    private fun setStatus(value: String) {
+        runOnUiThread { status.text = value }
+    }
+
+    private fun showEvent(message: String) {
+        runOnUiThread {
+            events.text = (events.text.toString() + "\n" + message).takeLast(2500)
         }
     }
 
     override fun onDestroy() {
-        speech.stop()
-        speech.shutdown()
+        endCall()
+        tokenField.text.clear()
         super.onDestroy()
     }
 }
