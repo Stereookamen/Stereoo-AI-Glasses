@@ -9,8 +9,8 @@ android {
         applicationId = "ru.stereoo.livekitpilot"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0-livekit-test"
+        versionCode = 2
+        versionName = "2.0-BV200-background-test"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
