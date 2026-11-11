@@ -1,9 +1,12 @@
 package ru.stereoo.aiglasses
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.text.InputType
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -13,215 +16,167 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import io.livekit.android.LiveKit
-import io.livekit.android.room.Room
-import io.livekit.android.events.collect
-import io.livekit.android.token.TokenSource
-import io.livekit.android.token.ConfigurableTokenSource
-import io.livekit.android.token.TokenRequestOptions
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
-import java.util.UUID
 
 /**
- * Stereoo • LiveKit test for Motorola moto g15.
- * Standalone prototype: audio WebRTC + LiveKit Cloud agent dispatch.
- * Agent: assistant-1c7e, deployed in Frankfurt / Google Gemini Live.
- *
- * No API key or secret is embedded in the application.
- * Development token server IDs must never be used in a production release.
- * No camera/BV200 button handling, lockscreen service or long-term memory yet.
+ * Visible control panel for the microphone Foreground Service.
+ * Audio and WebRTC are owned by VoiceSessionService and continue after lock.
  */
 class MainActivity : ComponentActivity() {
-    private lateinit var tokenField: EditText
+    private lateinit var tokenIdField: EditText
     private lateinit var agentField: EditText
-    private lateinit var status: TextView
-    private lateinit var events: TextView
-    private var room: Room? = null
-    private var connecting: Job? = null
-    private var eventsJob: Job? = null
-    private var isConnected = false
-    private var micEnabled = true
+    private lateinit var statusView: TextView
+    private lateinit var routeView: TextView
+    private lateinit var transcriptView: TextView
 
-    private val permissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { allowed ->
-        if (allowed) startCall() else setStatus("Без разрешения микрофона разговор невозможен.")
+    private val permissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED) {
+            launchVoiceService()
+        } else {
+            statusView.text = "Разреши микрофон в настройках приложения."
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val container = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(34, 26, 34, 26)
+            setPadding(32, 24, 32, 32)
         }
-        fun label(content: String, size: Float = 16f): TextView =
+        fun label(value: String, font: Float = 16f): TextView =
             TextView(this).apply {
-                text = content
-                textSize = size
-                setPadding(0, 8, 0, 10)
+                text = value
+                textSize = font
+                setPadding(0, 6, 0, 10)
             }
-        container.addView(label("Stereoo • LiveKit / Gemini Live", 23f))
-        container.addView(label(
-            "Тест настоящего Realtime через WebRTC.\n" +
-            "Для подключения нужен только Token server ID из LiveKit Cloud. " +
-            "API Key и API Secret не вводить!"
-        ))
-        container.addView(label("Token server ID (Settings → Project Settings):"))
-        tokenField = EditText(this).apply {
-            hint = "Скопируй Token server ID"
-            isSingleLine = true
+        fun button(value: String, action: () -> Unit): Button =
+            Button(this).apply { text = value; setOnClickListener { action() } }
+
+        root.addView(label("Stereoo • LiveKit v2 👓", 24f))
+        root.addView(label("Gemini Live через LiveKit. " +
+            "Фоновый разговор при выключенном экране и Bluetooth-маршрут для BV200."))
+        root.addView(label("Development Token Server ID"))
+        tokenIdField = EditText(this).apply {
+            hint = "ID тестового сервера токенов"
             inputType = InputType.TYPE_CLASS_TEXT
-            importantForAutofill = android.view.View.IMPORTANT_FOR_AUTOFILL_NO
+            isSingleLine = true
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
         }
-        container.addView(tokenField)
-        container.addView(label("Имя развёрнутого агента:"))
+        root.addView(tokenIdField)
+        root.addView(label("Agent Name"))
         agentField = EditText(this).apply {
             setText("assistant-1c7e")
             isSingleLine = true
             inputType = InputType.TYPE_CLASS_TEXT
         }
-        container.addView(agentField)
-        container.addView(Button(this).apply {
-            text = "🎙 Начать разговор"
-            setOnClickListener { checkMicrophoneAndStart() }
+        root.addView(agentField)
+        root.addView(button("🎙 Начать разговор") { checkAndStart() })
+        root.addView(button("🎧 Вывести голос в BV200 / Bluetooth") {
+            serviceAction(VoiceSessionService.ACTION_BT)
         })
-        container.addView(Button(this).apply {
-            text = "🔇 Вкл. / выкл. микрофон"
-            setOnClickListener { toggleMicrophone() }
+        root.addView(button("🔊 Автоматический выбор звука") {
+            serviceAction(VoiceSessionService.ACTION_AUTO)
         })
-        container.addView(Button(this).apply {
-            text = "⏹ Завершить"
-            setOnClickListener { endCall() }
+        root.addView(button("🔇 Включить / выключить микрофон") {
+            serviceAction(VoiceSessionService.ACTION_MIC)
         })
-        status = label("Готово. Введи Token server ID и нажми «Начать разговор».")
-        container.addView(status)
-        events = label("", 13f).apply { setTextIsSelectable(true) }
-        container.addView(events)
-        container.addView(label(
-            "⚠ Только для тестов. Development token server позволяет получать " +
-            "неограниченные по разрешениям тестовые токены. После тестирования " +
-            "выключи его в LiveKit Cloud. Для рабочей версии нужен сервер " +
-            "с авторизацией пользователей и ограничением доступа."
-        , 13f))
-        setContentView(ScrollView(this).apply { addView(container) })
+        root.addView(button("⏹ Завершить разговор") {
+            serviceAction(VoiceSessionService.ACTION_STOP)
+        })
+        statusView = label("Готово.", 17f)
+        root.addView(statusView)
+        routeView = label("Звук: не подключено", 14f)
+        root.addView(routeView)
+        root.addView(label("Последние фразы (только память приложения)", 13f))
+        transcriptView = label("", 15f).apply { setTextIsSelectable(true) }
+        root.addView(transcriptView)
+        root.addView(label(
+            "Тестовое ограничение: разговор выключится через 10 минут. " +
+            "В процессе должна быть постоянная системная нотификация.\n" +
+            "Начни разговор при открытом приложении, затем заблокируй экран. " +
+            "Смартфон может попросить разрешить работу в фоне.\n\n" +
+            "⚠ Ключи API/Secret НЕ вводить. Development Token Server небезопасен " +
+            "для открытого доступа, после тестов отключи его в LiveKit.\n" +
+            "Фото, кнопки BV200 и долговременная память будут добавлены отдельно.", 13f
+        ))
+        setContentView(ScrollView(this).apply { addView(root) })
+
+        lifecycleScope.launch {
+            StereooSession.state.collect { s ->
+                statusView.text = s.status
+                routeView.text = "Маршрут: ${s.audioRoute} • " +
+                    if (s.microphone) "🎙 Микрофон включён" else "🔇 Выключен"
+                transcriptView.text = s.transcript
+            }
+        }
     }
 
-    private fun checkMicrophoneAndStart() {
-        if (connecting != null || isConnected) {
-            setStatus("Сессия уже запущена.")
+    private fun checkAndStart() {
+        if (StereooSession.state.value.active) {
+            statusView.text = "Сессия уже запущена."
             return
         }
-        if (tokenField.text.toString().trim().isEmpty()) {
-            setStatus("Введи Token server ID, не Agent ID и не API Secret.")
+        if (tokenIdField.text.toString().trim().isBlank()) {
+            statusView.text = "Введи Development Token Server ID, не Agent ID."
             return
         }
-        if (agentField.text.toString().trim().isEmpty()) {
-            setStatus("Нужно имя агента из LiveKit Agent Overview.")
+        if (agentField.text.toString().trim().isBlank()) {
+            statusView.text = "Введи Agent Name."
             return
         }
+        val missing = mutableListOf<String>()
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
             != PackageManager.PERMISSION_GRANTED) {
-            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-        } else startCall()
+            missing += Manifest.permission.RECORD_AUDIO
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED) {
+            missing += Manifest.permission.BLUETOOTH_CONNECT
+        }
+        // POST_NOTIFICATIONS is not mandatory for running a microphone FGS.
+        // The OS task manager still shows ongoing services if notifications are denied.
+        if (missing.isNotEmpty()) {
+            permissions.launch(missing.toTypedArray())
+        } else launchVoiceService()
     }
 
-    private fun startCall() {
-        if (connecting != null || isConnected) return
-        val tokenServerId = tokenField.text.toString().trim()
-        val agentName = agentField.text.toString().trim()
-        val sessionRoom = "stereoo-" + UUID.randomUUID().toString().substring(0, 12)
-        events.text = ""
-        setStatus("Запрашиваю временный токен…")
-        connecting = lifecycleScope.launch {
-            try {
-                val source = TokenSource.fromDevelopmentTokenServer(tokenServerId)
-                    as ConfigurableTokenSource
-                val response = source.fetch(
-                    TokenRequestOptions(
-                        roomName = sessionRoom,
-                        agentName = agentName,
-                        participantName = "Stereoo test"
-                    )
-                ).getOrThrow()
-                setStatus("Токен получен. Подключаю WebRTC…")
-                val newRoom = LiveKit.create(applicationContext)
-                room = newRoom
-                eventsJob = lifecycleScope.launch {
-                    newRoom.events.collect {
-                        showEvent(it.javaClass.simpleName)
-                    }
-                }
-                newRoom.connect(response.serverUrl, response.participantToken)
-                newRoom.localParticipant.setMicrophoneEnabled(true)
-                micEnabled = true
-                isConnected = true
-                setStatus("🟢 Подключено. Разговаривай с агентом. Если он не ответил, проверь Agent Overview.")
-                showEvent("Комната: $sessionRoom")
-                showEvent("Агент: $agentName")
-            } catch (_: CancellationException) {
-                // user stopped session
-            } catch (e: Exception) {
-                setStatus("Ошибка подключения: ${e.message?.take(200) ?: e.javaClass.simpleName}")
-                disconnectRoom()
-            } finally {
-                connecting = null
-            }
+    private fun launchVoiceService() {
+        // Starting microphone FGS from an unlocked, visible Activity is required.
+        val start = Intent(this, VoiceSessionService::class.java)
+            .setAction(VoiceSessionService.ACTION_START)
+            .putExtra(VoiceSessionService.EXTRA_TOKEN_SERVER_ID,
+                tokenIdField.text.toString().trim())
+            .putExtra(VoiceSessionService.EXTRA_AGENT_NAME,
+                agentField.text.toString().trim())
+        try {
+            ContextCompat.startForegroundService(this, start)
+            statusView.text = "Запускаю фоновый голосовой режим…"
+        } catch (e: Exception) {
+            statusView.text = "Android запретил запуск: ${e.message ?: e.javaClass.simpleName}"
         }
     }
 
-    private fun toggleMicrophone() {
-        val r = room
-        if (r == null || !isConnected) {
-            setStatus("Сначала подключись к агенту.")
+    private fun serviceAction(action: String) {
+        if (!StereooSession.state.value.active) {
+            statusView.text = "Сначала начни разговор."
             return
         }
-        lifecycleScope.launch {
-            try {
-                val newValue = !micEnabled
-                r.localParticipant.setMicrophoneEnabled(newValue)
-                micEnabled = newValue
-                setStatus(if (micEnabled) "🎙 Микрофон включён." else "🔇 Микрофон выключен.")
-            } catch (e: Exception) {
-                setStatus("Ошибка микрофона: " + (e.message ?: e.javaClass.simpleName))
-            }
-        }
-    }
-
-    private fun endCall() {
-        connecting?.cancel()
-        connecting = null
-        disconnectRoom()
-        setStatus("Разговор завершён.")
-    }
-
-    private fun disconnectRoom() {
-        eventsJob?.cancel()
-        eventsJob = null
-        val current = room
-        room = null
-        isConnected = false
-        micEnabled = true
-        lifecycleScope.launch {
-            try { current?.disconnect() } catch (_: Exception) {}
-            try { current?.release() } catch (_: Exception) {}
-        }
-    }
-
-    private fun setStatus(value: String) {
-        runOnUiThread { status.text = value }
-    }
-
-    private fun showEvent(message: String) {
-        runOnUiThread {
-            events.text = (events.text.toString() + "\n" + message).takeLast(2500)
+        // Service already runs in foreground; startService is enough for control.
+        try {
+            startService(Intent(this, VoiceSessionService::class.java).setAction(action))
+        } catch (e: Exception) {
+            statusView.text = "Не удалось выполнить команду: ${e.javaClass.simpleName}"
         }
     }
 
     override fun onDestroy() {
-        endCall()
-        tokenField.text.clear()
+        // Service continues to run; the user ends it using UI or notification.
+        tokenIdField.text.clear()
         super.onDestroy()
     }
 }
