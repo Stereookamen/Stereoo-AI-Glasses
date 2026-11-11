@@ -1,206 +1,182 @@
 package ru.stereoo.aiglasses
 
-import android.app.Activity
-import android.os.Bundle
+import android.Manifest
 import android.content.Intent
-import android.speech.tts.TextToSpeech
-import android.speech.RecognizerIntent
-import android.graphics.BitmapFactory
-import android.net.Uri
-import android.widget.*
-import android.view.ViewGroup
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Bundle
+import android.text.InputType
+import android.view.View
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
-import java.net.HttpURLConnection
-import java.net.URL
-import java.util.Locale
-import org.json.JSONObject
-import org.json.JSONArray
-import android.util.Base64
-import kotlin.concurrent.thread
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
-class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+/**
+ * Visible control panel for the microphone Foreground Service.
+ * Audio and WebRTC are owned by VoiceSessionService and continue after lock.
+ */
+class MainActivity : ComponentActivity() {
+    private lateinit var tokenIdField: EditText
+    private lateinit var agentField: EditText
+    private lateinit var statusView: TextView
+    private lateinit var routeView: TextView
+    private lateinit var transcriptView: TextView
 
-    private lateinit var question: EditText
-    private lateinit var answer: TextView
-    private lateinit var speech: TextToSpeech
-    private var imageUri: Uri? = null
-    private var apiKey = ""
-
-    private val imagePicker =
-        registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
-            imageUri = uri
-            if (uri != null) answer.text = "Фотография выбрана."
+    private val permissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        if (results[Manifest.permission.RECORD_AUDIO] == true ||
+            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            == PackageManager.PERMISSION_GRANTED) {
+            launchVoiceService()
+        } else {
+            statusView.text = "Разреши микрофон в настройках приложения."
         }
-
-    private val voiceInput =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            if (result.resultCode == Activity.RESULT_OK) {
-                val text = result.data
-                    ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                    ?.firstOrNull()
-                if (!text.isNullOrBlank()) {
-                    question.setText(text)
-                    sendQuestion()
-                }
-            }
-        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        speech = TextToSpeech(this, this)
-
-        val layout = LinearLayout(this).apply {
+        val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(28, 32, 28, 24)
+            setPadding(32, 24, 32, 32)
         }
-
-        layout.addView(TextView(this).apply {
-            text = "Stereoo AI Glasses"
-            textSize = 26f
-        })
-
-        question = EditText(this).apply {
-            hint = "Напиши вопрос..."
-            minLines = 2
-        }
-        layout.addView(question)
-
-        val askButton = Button(this).apply {
-            text = "Отправить вопрос"
-            setOnClickListener { sendQuestion() }
-        }
-        layout.addView(askButton)
-
-        val voiceButton = Button(this).apply {
-            text = "🎙 Говорить"
-            setOnClickListener { startVoiceInput() }
-        }
-        layout.addView(voiceButton)
-
-        val photoButton = Button(this).apply {
-            text = "📷 Выбрать фотографию"
-            setOnClickListener { imagePicker.launch("image/*") }
-        }
-        layout.addView(photoButton)
-
-        answer = TextView(this).apply {
-            text = "Готов к работе. Для запросов нужен API-ключ OpenAI."
-            textSize = 17f
-        }
-        layout.addView(answer)
-
-        setContentView(ScrollView(this).apply { addView(layout) })
-    }
-
-    override fun onInit(status: Int) {
-        if (status == TextToSpeech.SUCCESS) {
-            speech.language = Locale("ru", "RU")
-        }
-    }
-
-    private fun startVoiceInput() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-            )
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, "ru-RU")
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Говори")
-        }
-
-        try {
-            voiceInput.launch(intent)
-        } catch (e: Exception) {
-            answer.text = "Голосовой ввод недоступен на устройстве."
-        }
-    }
-
-    private fun sendQuestion() {
-        val text = question.text.toString().trim()
-        if (text.isEmpty() && imageUri == null) {
-            answer.text = "Сначала введи вопрос или выбери фотографию."
-            return
-        }
-
-        if (apiKey.isBlank()) {
-            answer.text = "Пока не подключён API-ключ OpenAI. Добавим безопасную настройку позже."
-            return
-        }
-
-        answer.text = "Отправляю запрос..."
-
-        thread {
-            try {
-                val connection = URL("https://api.openai.com/v1/responses")
-                    .openConnection() as HttpURLConnection
-
-                connection.requestMethod = "POST"
-                connection.setRequestProperty("Authorization", "Bearer $apiKey")
-                connection.setRequestProperty("Content-Type", "application/json")
-                connection.connectTimeout = 20000
-                connection.readTimeout = 60000
-                connection.doOutput = true
-
-                val input = JSONObject()
-                input.put("model", "gpt-4.1-mini")
-                input.put("input", text)
-
-                connection.outputStream.use {
-                    it.write(input.toString().toByteArray(Charsets.UTF_8))
-                }
-
-                val responseCode = connection.responseCode
-                val stream = if (responseCode in 200..299) {
-                    connection.inputStream
-                } else {
-                    connection.errorStream
-                }
-
-                val response = stream.bufferedReader().use { it.readText() }
-
-                if (responseCode !in 200..299) {
-                    throw Exception("Ошибка API: HTTP $responseCode")
-                }
-
-                val json = JSONObject(response)
-                val output = json.optJSONArray("output") ?: JSONArray()
-                val result = StringBuilder()
-
-                for (i in 0 until output.length()) {
-                    val item = output.optJSONObject(i) ?: continue
-                    val content = item.optJSONArray("content") ?: continue
-
-                    for (j in 0 until content.length()) {
-                        val part = content.optJSONObject(j) ?: continue
-                        if (part.optString("type") == "output_text") {
-                            result.append(part.optString("text"))
-                        }
-                    }
-                }
-
-                val message = result.toString().ifBlank {
-                    "Не удалось получить текстовый ответ."
-                }
-
-                runOnUiThread {
-                    answer.text = message
-                    speech.speak(message, TextToSpeech.QUEUE_FLUSH, null, "answer")
-                }
-
-                connection.disconnect()
-            } catch (e: Exception) {
-                runOnUiThread {
-                    answer.text = "Не удалось отправить запрос: ${e.message}"
-                }
+        fun label(value: String, font: Float = 16f): TextView =
+            TextView(this).apply {
+                text = value
+                textSize = font
+                setPadding(0, 6, 0, 10)
             }
+        fun button(value: String, action: () -> Unit): Button =
+            Button(this).apply { text = value; setOnClickListener { action() } }
+
+        root.addView(label("Stereoo • LiveKit v2 👓", 24f))
+        root.addView(label("Gemini Live через LiveKit. " +
+            "Фоновый разговор при выключенном экране и Bluetooth-маршрут для BV200."))
+        root.addView(label("Development Token Server ID"))
+        tokenIdField = EditText(this).apply {
+            hint = "ID тестового сервера токенов"
+            inputType = InputType.TYPE_CLASS_TEXT
+            isSingleLine = true
+            importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+        }
+        root.addView(tokenIdField)
+        root.addView(label("Agent Name"))
+        agentField = EditText(this).apply {
+            setText("assistant-1c7e")
+            isSingleLine = true
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+        root.addView(agentField)
+        root.addView(button("🎙 Начать разговор") { checkAndStart() })
+        root.addView(button("🎧 Вывести голос в BV200 / Bluetooth") {
+            serviceAction(VoiceSessionService.ACTION_BT)
+        })
+        root.addView(button("🔊 Автоматический выбор звука") {
+            serviceAction(VoiceSessionService.ACTION_AUTO)
+        })
+        root.addView(button("🔇 Включить / выключить микрофон") {
+            serviceAction(VoiceSessionService.ACTION_MIC)
+        })
+        root.addView(button("⏹ Завершить разговор") {
+            serviceAction(VoiceSessionService.ACTION_STOP)
+        })
+        statusView = label("Готово.", 17f)
+        root.addView(statusView)
+        routeView = label("Звук: не подключено", 14f)
+        root.addView(routeView)
+        root.addView(label("Последние фразы (только память приложения)", 13f))
+        transcriptView = label("", 15f).apply { setTextIsSelectable(true) }
+        root.addView(transcriptView)
+        root.addView(label(
+            "Тестовое ограничение: разговор выключится через 10 минут. " +
+            "В процессе должна быть постоянная системная нотификация.\n" +
+            "Начни разговор при открытом приложении, затем заблокируй экран. " +
+            "Смартфон может попросить разрешить работу в фоне.\n\n" +
+            "⚠ Ключи API/Secret НЕ вводить. Development Token Server небезопасен " +
+            "для открытого доступа, после тестов отключи его в LiveKit.\n" +
+            "Фото, кнопки BV200 и долговременная память будут добавлены отдельно.", 13f
+        ))
+        setContentView(ScrollView(this).apply { addView(root) })
+
+        lifecycleScope.launch {
+            StereooSession.state.collect { s ->
+                statusView.text = s.status
+                routeView.text = "Маршрут: ${s.audioRoute} • " +
+                    if (s.microphone) "🎙 Микрофон включён" else "🔇 Выключен"
+                transcriptView.text = s.transcript
+            }
+        }
+    }
+
+    private fun checkAndStart() {
+        if (StereooSession.state.value.active) {
+            statusView.text = "Сессия уже запущена."
+            return
+        }
+        if (tokenIdField.text.toString().trim().isBlank()) {
+            statusView.text = "Введи Development Token Server ID, не Agent ID."
+            return
+        }
+        if (agentField.text.toString().trim().isBlank()) {
+            statusView.text = "Введи Agent Name."
+            return
+        }
+        val missing = mutableListOf<String>()
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+            != PackageManager.PERMISSION_GRANTED) {
+            missing += Manifest.permission.RECORD_AUDIO
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT)
+                != PackageManager.PERMISSION_GRANTED) {
+            missing += Manifest.permission.BLUETOOTH_CONNECT
+        }
+        // POST_NOTIFICATIONS is not mandatory for running a microphone FGS.
+        // The OS task manager still shows ongoing services if notifications are denied.
+        if (missing.isNotEmpty()) {
+            permissions.launch(missing.toTypedArray())
+        } else launchVoiceService()
+    }
+
+    private fun launchVoiceService() {
+        // Starting microphone FGS from an unlocked, visible Activity is required.
+        val start = Intent(this, VoiceSessionService::class.java)
+            .setAction(VoiceSessionService.ACTION_START)
+            .putExtra(VoiceSessionService.EXTRA_TOKEN_SERVER_ID,
+                tokenIdField.text.toString().trim())
+            .putExtra(VoiceSessionService.EXTRA_AGENT_NAME,
+                agentField.text.toString().trim())
+        try {
+            ContextCompat.startForegroundService(this, start)
+            statusView.text = "Запускаю фоновый голосовой режим…"
+        } catch (e: Exception) {
+            statusView.text = "Android запретил запуск: ${e.message ?: e.javaClass.simpleName}"
+        }
+    }
+
+    private fun serviceAction(action: String) {
+        if (!StereooSession.state.value.active) {
+            statusView.text = "Сначала начни разговор."
+            return
+        }
+        // Service already runs in foreground; startService is enough for control.
+        try {
+            startService(Intent(this, VoiceSessionService::class.java).setAction(action))
+        } catch (e: Exception) {
+            statusView.text = "Не удалось выполнить команду: ${e.javaClass.simpleName}"
         }
     }
 
     override fun onDestroy() {
-        speech.stop()
-        speech.shutdown()
+        // Service continues to run; the user ends it using UI or notification.
+        tokenIdField.text.clear()
         super.onDestroy()
     }
 }
