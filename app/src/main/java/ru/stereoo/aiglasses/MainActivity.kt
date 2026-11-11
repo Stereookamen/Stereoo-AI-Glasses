@@ -51,6 +51,7 @@ class MainActivity : ComponentActivity() {
     @Volatile private var recording = false
     @Volatile private var playing = false
     @Volatile private var responding = false
+    @Volatile private var lastSocketEvent: String = "подключение не начиналось"
     @Volatile private var lastPhase = "Подключение не начато"
     @Volatile private var lastApiError = ""
     @Volatile private var everOpened = false
@@ -164,7 +165,11 @@ class MainActivity : ComponentActivity() {
             override fun onMessage(webSocket: WebSocket, text: String) {
                 try {
                     val evt = JSONObject(text)
-                    when (evt.optString("type")) {
+                    val type = evt.optString("type")
+                    if (type != "response.audio.delta" && type != "response.audio_transcript.delta") {
+                        lastSocketEvent = type.take(80)
+                    }
+                    when (type) {
                         "session.created" -> {
                             lastPhase = "Получено session.created; отправляем настройки"
                             sendSessionSetup(webSocket)
@@ -260,6 +265,9 @@ class MainActivity : ComponentActivity() {
         while (cause.cause != null && cause.cause !== cause) cause = cause.cause!!
         // Intentionally omit cause.message: it may contain the request URL or other details.
         return when (cause) {
+            is java.io.EOFException ->
+                "EOF: сервер или посредник разорвал WebSocket после открытия. " +
+                    "Это не доказывает проблему VPN или неверный ключ."
             is java.net.UnknownHostException ->
                 "Ошибка DNS: адрес сервера не найден. Проверь Workspace ID и доступность сети через VPN."
             is javax.net.ssl.SSLException ->
@@ -282,20 +290,20 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun sendSessionSetup(ws: WebSocket) {
-        // Use the exact minimal example from Alibaba's Qwen3.8 WebSocket docs.
-        // In particular, do not send prefix_padding_ms (not supported by this model).
+        // Minimal official Qwen3.8 session config. PCM defaults: 16 kHz in, 24 kHz out.
+        // Complex nested audio overrides are intentionally omitted until the first
+        // successful session.updated event, to isolate protocol vs network failures.
         val session = JSONObject()
             .put("modalities", JSONArray().put("text").put("audio"))
             .put("voice", "Tina")
             .put("turn_detection", JSONObject().put("type", "server_vad"))
-            .put("instructions", "Ты голосовой помощник на русском языке. " +
-                "Разговаривай естественно, коротко и понятно. " +
-                "Можешь обсуждать изображения в том же диалоге.")
+            .put("instructions", "Ты русскоязычный ассистент умных очков. " +
+                "Общайся естественно и кратко. Отвечай голосом. " +
+                "Когда пользователь присылает фотографию, обсуждай её содержимое.")
         val event = JSONObject().put("type", "session.update").put("session", session)
-        val sent = ws.send(event.toString())
-        lastPhase = if (sent) "Отправлено session.update; ожидаем session.updated"
-            else "Ошибка отправки session.update"
-        showStatus(lastPhase)
+        ws.send(event.toString())
+        lastSocketEvent = "session.update отправлен"
+        showStatus("Сервер подтвердил session.created. Отправил session.update…")
     }
 
     private fun startAudio() {
